@@ -19,10 +19,12 @@ import {
   ConnectionMode,
   ConnectionLineType,
   MarkerType,
+  MiniMap,
   ReactFlow,
   ReactFlowProvider,
   reconnectEdge,
   useReactFlow,
+  useStore,
   type Connection,
   type Edge,
   type EdgeChange,
@@ -85,6 +87,14 @@ function normalizeConnection(connection: Connection): Connection {
     targetHandle: targetHandleId(targetPort),
   };
 }
+
+// Undo history. Every structural change funnels through replaceCanvas, so one
+// snapshot taken there covers the whole editor. Changes that land within the
+// merge window collapse into a single step — typing a name in the Inspector
+// fires per keystroke and should undo as one edit, not thirty.
+const historyLimit = 50;
+const historyMergeWindow = 400;
+type CanvasSnapshot = { nodes: SemanticFlowNode[]; edges: SemanticFlowEdge[] };
 
 type AlignmentGuides = { x?: number; y?: number; label: string };
 type CanvasContextMenu = { x: number; y: number; flowPosition: { x: number; y: number } };
@@ -220,18 +230,67 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
     const clipboardRef = useRef<{ nodes: DiagramNode[]; edges: DiagramEdge[] } | null>(null);
     const pasteCountRef = useRef(0);
     const wrapperRef = useRef<HTMLDivElement>(null);
-    const { fitView, flowToScreenPosition, screenToFlowPosition } = useReactFlow();
+    // Set once the person pans or zooms by hand; from then on the canvas keeps
+    // their viewport instead of re-fitting when the stage is resized.
+    const viewportPinnedRef = useRef(false);
+    const historyRef = useRef<{ past: CanvasSnapshot[]; future: CanvasSnapshot[] }>({ past: [], future: [] });
+    const lastCommitRef = useRef(0);
+    const restoringRef = useRef(false);
+    // ReactFlow measures every node on mount and reports it as a dimension
+    // change; without this the canvas would start life with a phantom undo step.
+    const interactedRef = useRef(false);
+    const [historyRevision, setHistoryRevision] = useState(0);
+    const { fitView, flowToScreenPosition, screenToFlowPosition, zoomIn, zoomOut, zoomTo } = useReactFlow();
+    const zoom = useStore((state) => state.transform[2]);
+
+    const commitHistory = useCallback(() => {
+      if (restoringRef.current) return;
+      const now = performance.now();
+      const history = historyRef.current;
+      if (history.past.length > 0 && now - lastCommitRef.current < historyMergeWindow) {
+        lastCommitRef.current = now;
+        return;
+      }
+      lastCommitRef.current = now;
+      history.past.push({ nodes: nodesRef.current, edges: edgesRef.current });
+      if (history.past.length > historyLimit) history.past.shift();
+      history.future = [];
+      setHistoryRevision((value) => value + 1);
+    }, []);
+
+    const resetHistory = useCallback(() => {
+      historyRef.current = { past: [], future: [] };
+      lastCommitRef.current = 0;
+      interactedRef.current = false;
+      setHistoryRevision((value) => value + 1);
+    }, []);
 
     const replaceCanvas = useCallback(
       (nextNodes: SemanticFlowNode[], nextEdges: SemanticFlowEdge[], persist = true) => {
+        if (persist) commitHistory();
         nodesRef.current = nextNodes;
         edgesRef.current = nextEdges;
         setNodes(nextNodes);
         setEdges(nextEdges);
         if (persist) onDocumentChange(toDocument(document, nextNodes, nextEdges));
       },
-      [document, onDocumentChange],
+      [commitHistory, document, onDocumentChange],
     );
+
+    const restore = useCallback((direction: "undo" | "redo") => {
+      if (readOnly) return;
+      const history = historyRef.current;
+      const from = direction === "undo" ? history.past : history.future;
+      const to = direction === "undo" ? history.future : history.past;
+      const target = from.pop();
+      if (!target) return;
+      to.push({ nodes: nodesRef.current, edges: edgesRef.current });
+      restoringRef.current = true;
+      lastCommitRef.current = 0;
+      replaceCanvas(target.nodes, target.edges);
+      restoringRef.current = false;
+      setHistoryRevision((value) => value + 1);
+    }, [readOnly, replaceCanvas]);
 
     const arrange = useCallback(async () => {
       if (nodesRef.current.length === 0) return;
@@ -240,6 +299,7 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
       const arranged = await layoutDocument(current);
       const flow = toFlow(arranged);
       replaceCanvas(flow.nodes, flow.edges);
+      viewportPinnedRef.current = false;
       requestAnimationFrame(() => fitView({ padding: 0.14, duration: 520 }));
       setIsLayouting(false);
     }, [document, fitView, replaceCanvas]);
@@ -263,6 +323,8 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
         requestAnimationFrame(() => fitView({ padding: 0.14, duration: 0 }));
       }
       onSelectionChange?.({ nodeIds: [], edgeIds: [] });
+      viewportPinnedRef.current = false;
+      resetHistory();
       return () => { cancelled = true; };
       // Workspace changes reset the canvas; edits within a workspace stay local.
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -482,6 +544,28 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
       setIsLayouting(false);
     }, [document, fitView, replaceCanvas]);
 
+    // Fix 11 — .canvas-stage is a size container, so resizing a panel or the
+    // window changes the drawing surface while the ReactFlow viewport stays put
+    // and the diagram drifts out of frame. Re-fit once the resizing settles,
+    // unless the person has taken control of the viewport themselves.
+    useEffect(() => {
+      const element = wrapperRef.current;
+      if (!element || typeof ResizeObserver === "undefined") return;
+      let timer = 0;
+      const observer = new ResizeObserver(() => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => {
+          if (viewportPinnedRef.current || nodesRef.current.length === 0) return;
+          fitView({ padding: 0.14, duration: 0 });
+        }, 150);
+      });
+      observer.observe(element);
+      return () => {
+        window.clearTimeout(timer);
+        observer.disconnect();
+      };
+    }, [fitView]);
+
     useEffect(() => {
       const onKeyDown = (event: KeyboardEvent) => {
         const target = event.target as HTMLElement | null;
@@ -497,10 +581,18 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
           event.preventDefault();
           pasteSelection();
         }
+        if (event.key.toLowerCase() === "z") {
+          event.preventDefault();
+          restore(event.shiftKey ? "redo" : "undo");
+        }
+        if (event.key.toLowerCase() === "y") {
+          event.preventDefault();
+          restore("redo");
+        }
       };
       window.addEventListener("keydown", onKeyDown);
       return () => window.removeEventListener("keydown", onKeyDown);
-    }, [copySelection, pasteSelection]);
+    }, [copySelection, pasteSelection, restore]);
 
     useImperativeHandle(ref, () => ({ arrange, deleteSelection, groupSelection, insertPrimitive, ungroupSelection, updateEdges, updateNodes }), [arrange, deleteSelection, groupSelection, insertPrimitive, ungroupSelection, updateEdges, updateNodes]);
 
@@ -509,12 +601,15 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
       for (const change of changes) {
         if (change.type === "dimensions" && change.dimensions) dimensions.set(change.id, change.dimensions);
       }
+      const removed = new Set(changes.filter((change) => change.type === "remove").map((change) => change.id));
+      // Deletions and hand resizes are undoable; the measurement pass ReactFlow
+      // runs before anyone has touched the canvas is not.
+      if (removed.size > 0 || (dimensions.size > 0 && interactedRef.current)) commitHistory();
       const next = applyNodeChanges(changes, nodesRef.current).map((node) => dimensions.has(node.id)
         ? { ...node, data: { ...node.data, size: dimensions.get(node.id)! } }
         : node);
       nodesRef.current = next;
       setNodes(next);
-      const removed = new Set(changes.filter((change) => change.type === "remove").map((change) => change.id));
       if (removed.size > 0) {
         const nextEdges = edgesRef.current.filter((edge) => !removed.has(edge.source) && !removed.has(edge.target));
         edgesRef.current = nextEdges;
@@ -523,16 +618,18 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
       } else if (dimensions.size > 0) {
         onDocumentChange(toDocument(document, next, edgesRef.current));
       }
-    }, [document, onDocumentChange]);
+    }, [commitHistory, document, onDocumentChange]);
 
     const handleEdgesChange = useCallback((changes: EdgeChange<SemanticFlowEdge>[]) => {
+      const removes = changes.some((change) => change.type === "remove");
+      if (removes) commitHistory();
       const next = applyEdgeChanges(changes, edgesRef.current);
       edgesRef.current = next;
       setEdges(next);
-      if (changes.some((change) => change.type === "remove")) {
+      if (removes) {
         onDocumentChange(toDocument(document, nodesRef.current, next));
       }
-    }, [document, onDocumentChange]);
+    }, [commitHistory, document, onDocumentChange]);
 
     const handleSelectionChange = useCallback(({ nodes: selectedNodes, edges: selectedEdges }: { nodes: SemanticFlowNode[]; edges: SemanticFlowEdge[] }) => {
       onSelectionChange?.({ nodeIds: selectedNodes.map((node) => node.id), edgeIds: selectedEdges.map((edge) => edge.id) });
@@ -579,13 +676,24 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
       });
     }, [onSelectionChange, screenToFlowPosition]);
 
+    const canUndo = historyRef.current.past.length > 0;
+    const canRedo = historyRef.current.future.length > 0;
+    void historyRevision;
+
     return (
-      <div className="canvas-wrap" onContextMenuCapture={openContextMenu} ref={wrapperRef}>
+      <div className="canvas-wrap" onContextMenuCapture={openContextMenu} onPointerDownCapture={() => { interactedRef.current = true; }} ref={wrapperRef}>
         <div className="canvas-toolbar">
+          <button aria-label="Undo" disabled={readOnly || !canUndo} onClick={() => restore("undo")} title="Undo (⌘Z)" type="button">↺</button>
+          <button aria-label="Redo" disabled={readOnly || !canRedo} onClick={() => restore("redo")} title="Redo (⇧⌘Z)" type="button">↻</button>
+          <i className="canvas-toolbar-divider" />
           <button disabled={nodes.length === 0 || isLayouting} onClick={() => void arrange()} type="button">
             {isLayouting ? "Arranging…" : "Auto-layout"}
           </button>
-          <button disabled={nodes.length === 0} onClick={() => fitView({ padding: 0.14, duration: 420 })} type="button">Fit view</button>
+          <button disabled={nodes.length === 0} onClick={() => { viewportPinnedRef.current = false; fitView({ padding: 0.14, duration: 420 }); }} type="button">Fit view</button>
+          <i className="canvas-toolbar-divider" />
+          <button aria-label="Zoom out" onClick={() => { viewportPinnedRef.current = true; void zoomOut({ duration: 160 }); }} type="button">−</button>
+          <button aria-label="Reset zoom to 100%" className="zoom-readout" onClick={() => { viewportPinnedRef.current = true; void zoomTo(1, { duration: 160 }); }} type="button">{Math.round(zoom * 100)}%</button>
+          <button aria-label="Zoom in" onClick={() => { viewportPinnedRef.current = true; void zoomIn({ duration: 160 }); }} type="button">+</button>
           <span>{nodes.length} nodes · {edges.length} connections</span>
         </div>
         {nodes.length === 0 ? (
@@ -609,8 +717,8 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
           elevateNodesOnSelect={false}
           fitView
           fitViewOptions={{ padding: 0.14 }}
-          minZoom={0.45}
-          maxZoom={1.6}
+          minZoom={0.1}
+          maxZoom={2.5}
           nodeTypes={nodeTypes}
           nodes={nodes}
           nodesConnectable={!readOnly}
@@ -647,6 +755,7 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
             window.dispatchEvent(new CustomEvent(edgeCaptionEditEvent, { detail: { edgeId: clickedEdge.id } }));
           }}
           onEdgesChange={handleEdgesChange}
+          onMoveStart={(event) => { if (event) viewportPinnedRef.current = true; }}
           onNodeDragStart={(_, node) => {
             if (!isContainerNode(node)) return;
             containerDragRef.current = {
@@ -711,6 +820,15 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
         >
           <Background id="minor-grid" color="#171717" gap={8} size={0.45} variant={BackgroundVariant.Lines} />
           <Background id="major-grid" color="#292929" gap={32} size={0.8} variant={BackgroundVariant.Lines} />
+          <MiniMap
+            ariaLabel="Diagram minimap"
+            maskColor="rgba(5,5,5,.72)"
+            nodeColor={(node) => (node as SemanticFlowNode).data.color}
+            nodeStrokeWidth={3}
+            pannable
+            position="bottom-right"
+            zoomable
+          />
         </ReactFlow>
         {contextMenu ? <div aria-label="Canvas actions" className="canvas-context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y }} onContextMenu={(event) => event.preventDefault()}>
           <span>{contextNodeIds.length ? `${contextNodeIds.length} SELECTED` : "CANVAS"}</span>

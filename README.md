@@ -34,7 +34,13 @@ For either local option, start the loopback connector in a second terminal:
 npm run ai:local
 ```
 
-It listens only on `127.0.0.1:47821`. The browser performs an explicit PKCE pairing flow; provider credentials remain in the Codex or Claude CLI credential store.
+People using a deployed editor do not need a clone at all:
+
+```sh
+npx technical-infographic-connector --editor https://your-editor.example
+```
+
+The connector lives in [`tools/local-ai-connector`](tools/local-ai-connector) and listens only on `127.0.0.1:47821`. It offers everything this machine can reach — a model served by Ollama or any OpenAI-compatible server, the `claude` CLI, the `codex` CLI, or an `ANTHROPIC_API_KEY` — so Claude Local and Codex Local each land on the right one. Only the last needs a key. The browser performs an explicit PKCE pairing flow and receives an opaque token that expires in eight hours; no credential ever reaches the page.
 
 For an organization connection, set `NEXT_PUBLIC_AI_GATEWAY_MOCK=false` and enter the Gateway URL in Config. The Gateway must publish:
 

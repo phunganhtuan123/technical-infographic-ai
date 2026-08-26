@@ -6,7 +6,7 @@ import { AiAssistantProvider, AiConnectionSettings, GlobalAiComposer, ItemCommen
 import type { AiIntent, DiagramProposal } from "@/modules/ai/contracts";
 import { DiagramCanvas, primitiveDragType, type DiagramCanvasHandle } from "@/modules/canvas/diagram-canvas";
 import { ComponentIcon } from "@/modules/catalog/component-icon";
-import { roleColors, technologyOptions } from "@/modules/catalog/catalog";
+import { brandIconsSnapshot, ensureBrandIcons, roleColors, searchBrandIcons, technologyOptions } from "@/modules/catalog/catalog";
 import { TechnologyIcon } from "@/modules/catalog/technology-icon";
 import { compilePlan } from "@/modules/compiler/compile-plan";
 import { createBlankDocument, primitiveDefinitions } from "@/modules/diagram/factory";
@@ -25,6 +25,18 @@ const fontOptions: Array<{ value: NodeFontFamily; label: string }> = [
   { value: "ibm-plex-mono", label: "IBM Plex Mono" },
   { value: "system-sans", label: "System Sans" },
 ];
+// A cleared number field reads as "" and Number("") is 0, which used to snap a
+// component to 0x0 with no undo. Keep the previous value until a real number
+// is typed, then hold it inside the control's own range.
+function numberFieldValue(raw: string, fallback: number, lower: number, upper: number) {
+  if (raw.trim() === "") return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(upper, Math.max(lower, parsed));
+}
+
+// Narrowest the canvas column is allowed to become while a panel is dragged.
+const minimumCanvasWidth = 560;
 const flowRoles = new Set<NodeRole>(["start", "process", "decision", "input-output", "end", "document", "subprocess", "manual-input", "preparation", "delay", "connector", "off-page", "merge", "stored-data"]);
 const structureRoles = new Set<NodeRole>(["zone", "group"]);
 const annotationRoles = new Set<NodeRole>(["text", "note"]);
@@ -73,10 +85,53 @@ function activateScene(document: DiagramDocument, sceneId: string): DiagramDocum
   return { ...synced, activeSceneId: scene.id, mode: scene.mode, title: scene.title, purpose: scene.purpose, nodes: scene.nodes, edges: scene.edges };
 }
 
-const AssistedCanvas = forwardRef<DiagramCanvasHandle, { document: DiagramDocument; externalRevision: number; onDocumentChange: (document: DiagramDocument) => void; onSelectionChange: (selection: { nodeIds: string[]; edgeIds: string[] }) => void }>(function AssistedCanvas(props, ref) {
+const AssistedCanvas = forwardRef<DiagramCanvasHandle, { document: DiagramDocument; externalRevision: number; presenting?: boolean; onDocumentChange: (document: DiagramDocument) => void; onSelectionChange: (selection: { nodeIds: string[]; edgeIds: string[] }) => void }>(function AssistedCanvas({ presenting = false, ...props }, ref) {
   const ai = useAiAssistant();
-  return <DiagramCanvas {...props} document={ai.proposal?.document ?? props.document} externalRevision={props.externalRevision + (ai.proposal ? 1_000_000 : 0)} onDocumentChange={ai.proposal ? () => undefined : props.onDocumentChange} onSelectionChange={ai.proposal ? () => undefined : props.onSelectionChange} readOnly={Boolean(ai.proposal)} ref={ref} />;
+  const locked = Boolean(ai.proposal) || presenting;
+  return <DiagramCanvas {...props} document={ai.proposal?.document ?? props.document} externalRevision={props.externalRevision + (ai.proposal ? 1_000_000 : 0)} onDocumentChange={locked ? () => undefined : props.onDocumentChange} onSelectionChange={locked ? () => undefined : props.onSelectionChange} readOnly={locked} ref={ref} />;
 });
+
+// The curated catalog stays first — it is what the component library offers and
+// what carries lane/category meaning. Searching past two characters pulls in the
+// rest of simple-icons, loaded on demand the first time the field is focused.
+function IconPicker({ matches, onSelect }: { matches: (technology?: string) => boolean; onSelect: (technology: string | undefined) => void }) {
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState<"idle" | "loading" | "ready">(() => (brandIconsSnapshot() ? "ready" : "idle"));
+  const needle = query.trim().toLowerCase();
+
+  const loadIndex = useCallback(() => {
+    if (brandIconsSnapshot()) {
+      setStatus("ready");
+      return;
+    }
+    setStatus("loading");
+    void ensureBrandIcons().then(() => setStatus("ready")).catch(() => setStatus("idle"));
+  }, []);
+
+  const curatedIds = useMemo(() => new Set(technologyOptions.map((option) => option.id as string)), []);
+  const curated = needle
+    ? technologyOptions.filter((option) => option.label.toLowerCase().includes(needle) || option.id.includes(needle))
+    : technologyOptions;
+  const brandResults = needle.length >= 2 && status === "ready"
+    ? searchBrandIcons(needle).filter((icon) => !curatedIds.has(icon.slug))
+    : [];
+  const total = curated.length + brandResults.length;
+
+  return (
+    <>
+      <label className="search icon-search">
+        <span>⌕</span>
+        <input aria-label="Search technology icons" onChange={(event) => setQuery(event.target.value)} onFocus={loadIndex} placeholder="Search brand icons" value={query} />
+      </label>
+      <div className="icon-picker">
+        <button aria-label="No technology icon" className={matches(undefined) ? "active" : ""} onClick={() => onSelect(undefined)} title="No icon">—</button>
+        {curated.map((technology) => <button aria-label={`Use ${technology.label} icon`} className={matches(technology.id) ? "active" : ""} key={technology.id} onClick={() => onSelect(technology.id)} title={technology.label}><TechnologyIcon technology={technology.id} /></button>)}
+        {brandResults.map((icon) => <button aria-label={`Use ${icon.title} icon`} className={matches(icon.slug) ? "active" : ""} key={icon.slug} onClick={() => onSelect(icon.slug)} title={icon.title}><TechnologyIcon technology={icon.slug} /></button>)}
+      </div>
+      {needle.length >= 2 ? <p className="icon-picker-status">{status === "loading" ? "Loading brand icons…" : status === "ready" ? `${total} match${total === 1 ? "" : "es"}` : "Focus the field to load brand icons"}</p> : null}
+    </>
+  );
+}
 
 export function EditorShell() {
   const initialDocument = useMemo(() => normalizeWorkspace(compilePlan(architecturePlan)), []);
@@ -89,6 +144,9 @@ export function EditorShell() {
   const [libraryView, setLibraryView] = useState<"tree" | "grid">("tree");
   const [libraryWidth, setLibraryWidth] = useState(280);
   const [libraryCollapsed, setLibraryCollapsed] = useState(false);
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
+  const [presenting, setPresenting] = useState(false);
+  const [sceneTransition, setSceneTransition] = useState(false);
   const [componentListCollapsed, setComponentListCollapsed] = useState(false);
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set(["Technology"]));
   const [inspectorWidth, setInspectorWidth] = useState(280);
@@ -100,6 +158,8 @@ export function EditorShell() {
   const [configOpen, setConfigOpen] = useState(false);
   const canvasRef = useRef<DiagramCanvasHandle>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const shellRef = useRef<HTMLElement>(null);
+  const animationTimeout = useRef(0);
   const document = workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? workspaces[0];
   const selectedNodes = document.nodes.filter((node) => selectedNodeIds.includes(node.id));
   const selectedEdges = document.edges.filter((edge) => selectedEdgeIds.includes(edge.id));
@@ -201,6 +261,54 @@ export function EditorShell() {
     setExternalRevision((value) => value + 1);
   }, [document, updateWorkspace]);
 
+  // Presentation mode reuses Scenes as slides: the chrome is hidden, the canvas
+  // is locked, and left/right step through the scenes of this workspace.
+  const scenes = document.scenes ?? [];
+  const activeSceneIndex = Math.max(0, scenes.findIndex((scene) => scene.id === document.activeSceneId));
+
+  const goToScene = useCallback((index: number) => {
+    const list = document.scenes ?? [];
+    const target = list[index];
+    if (!target || target.id === document.activeSceneId) return;
+    setSceneTransition(true);
+    window.setTimeout(() => setSceneTransition(false), 260);
+    switchScene(target.id);
+  }, [document.activeSceneId, document.scenes, switchScene]);
+
+  const startPresenting = useCallback(() => {
+    setSelectedNodeIds([]);
+    setSelectedEdgeIds([]);
+    setIntent("publish");
+    setPresenting(true);
+    setExternalRevision((value) => value + 1);
+  }, []);
+
+  // No revision bump on the way out: the canvas ResizeObserver re-fits on its
+  // own once the panels come back, and the undo history survives the trip.
+  const stopPresenting = useCallback(() => {
+    setPresenting(false);
+  }, []);
+
+  useEffect(() => {
+    if (!presenting) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        stopPresenting();
+        return;
+      }
+      if (event.key === "ArrowRight" || event.key === "PageDown" || event.key === " ") {
+        event.preventDefault();
+        goToScene(activeSceneIndex + 1);
+      }
+      if (event.key === "ArrowLeft" || event.key === "PageUp") {
+        event.preventDefault();
+        goToScene(activeSceneIndex - 1);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeSceneIndex, goToScene, presenting, stopPresenting]);
+
   const createScene = useCallback(() => {
     const synced = syncActiveScene(document);
     const id = `scene-${crypto.randomUUID()}`;
@@ -242,31 +350,69 @@ export function EditorShell() {
     updateWorkspace({ ...synced, scenes: synced.scenes!.map((scene) => scene.id === synced.activeSceneId ? { ...scene, name } : scene) });
   }, [document, updateWorkspace]);
 
-  const startLibraryResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = libraryWidth;
-    const onMove = (moveEvent: PointerEvent) => setLibraryWidth(Math.min(420, Math.max(240, startWidth + moveEvent.clientX - startX)));
-    const onEnd = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onEnd);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onEnd, { once: true });
-  }, [libraryWidth]);
+  // Collapse and expand are the only layout changes that should animate. The
+  // class is added for the length of the transition and taken off again, so a
+  // window resize or a pointer drag never inherits it. (Fixes 01, 07 and 10.)
+  const animateLayout = useCallback((change: () => void) => {
+    const shell = shellRef.current;
+    if (shell) {
+      shell.classList.add("is-animating");
+      window.clearTimeout(animationTimeout.current);
+      animationTimeout.current = window.setTimeout(() => shell.classList.remove("is-animating"), 200);
+    }
+    change();
+  }, []);
 
-  const startInspectorResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+  useEffect(() => () => window.clearTimeout(animationTimeout.current), []);
+
+  // One handler for both panels. While the pointer is down the width is written
+  // straight to the CSS variable once per frame — no React state, so nothing
+  // re-renders — and committed to state exactly once on release.
+  // (Fixes 02, 03, 04 and 06.)
+  const startResize = useCallback((event: React.PointerEvent<HTMLDivElement>, side: "left" | "right") => {
+    const shell = shellRef.current;
+    if (!shell) return;
     event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    shell.classList.add("is-resizing");
+
+    const isLeft = side === "left";
+    const variable = isLeft ? "--library-width" : "--inspector-width";
     const startX = event.clientX;
-    const startWidth = inspectorWidth;
-    const onMove = (moveEvent: PointerEvent) => setInspectorWidth(Math.min(460, Math.max(220, startWidth + startX - moveEvent.clientX)));
+    const startWidth = isLeft ? libraryWidth : inspectorWidth;
+    const otherWidth = isLeft ? inspectorWidth : libraryWidth;
+    const lower = isLeft ? 240 : 220;
+    // The upper bound follows the live window width so the drag stops where the
+    // canvas would be squeezed out, instead of at a fixed number that silently
+    // clips the far panel on smaller screens.
+    const upper = Math.max(lower, Math.min(isLeft ? 420 : 460, window.innerWidth - otherWidth - minimumCanvasWidth));
+    let frame = 0;
+    let width = startWidth;
+
+    const onMove = (moveEvent: PointerEvent) => {
+      const delta = isLeft ? moveEvent.clientX - startX : startX - moveEvent.clientX;
+      width = Math.min(upper, Math.max(lower, startWidth + delta));
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        shell.style.setProperty(variable, `${width}px`);
+      });
+    };
+
     const onEnd = () => {
+      window.cancelAnimationFrame(frame);
+      shell.classList.remove("is-resizing");
+      if (isLeft) setLibraryWidth(width);
+      else setInspectorWidth(width);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
     };
+
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onEnd, { once: true });
-  }, [inspectorWidth]);
+    window.addEventListener("pointercancel", onEnd, { once: true });
+  }, [inspectorWidth, libraryWidth]);
 
   const handleSelection = useCallback(({ nodeIds, edgeIds }: { nodeIds: string[]; edgeIds: string[] }) => {
     setSelectedNodeIds(nodeIds);
@@ -341,7 +487,7 @@ export function EditorShell() {
 
   return (
     <AiAssistantProvider document={document} revision={documentRevision} selectedNodeIds={selectedNodeIds} selectedEdgeIds={selectedEdgeIds} onAccept={acceptAiProposal}>
-    <main className="app-shell" style={{ "--library-width": libraryCollapsed ? "52px" : `${libraryWidth}px`, "--inspector-width": `${inspectorWidth}px` } as React.CSSProperties}>
+    <main className={`app-shell${presenting ? " is-presenting" : ""}`} ref={shellRef} style={{ "--library-width": libraryCollapsed ? "52px" : `${libraryWidth}px`, "--inspector-width": inspectorCollapsed ? "52px" : `${inspectorWidth}px` } as React.CSSProperties}>
       <header className="topbar">
         <div className="brand"><i /> Technical Infographic <span>alpha</span></div>
         <div className="intent-switch" aria-label="Workspace intent"><button className={intent === "build" ? "active" : ""} onClick={() => setIntent("build")}>Build</button><button className={intent === "publish" ? "active" : ""} onClick={() => setIntent("publish")}>Publish</button></div>
@@ -351,6 +497,7 @@ export function EditorShell() {
           <button aria-label="Import workspace JSON" onClick={() => importInputRef.current?.click()}>Import</button>
           <input accept="application/json,.json" aria-label="Workspace JSON file" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void importWorkspace(file); event.currentTarget.value = ""; }} ref={importInputRef} type="file" />
           <details className="export-menu"><summary>{exporting ? "Rendering…" : "Export"}</summary><div><button disabled={Boolean(exporting)} onClick={() => exportSvg(document)}>SVG animated</button><button disabled={Boolean(exporting)} onClick={() => exportPng(document)}>PNG 2× static</button><button disabled={Boolean(exporting)} onClick={() => exportHtml(document)}>HTML animated</button><button disabled={Boolean(exporting)} onClick={() => void runAnimatedExport("gif")}>{exporting === "gif" ? "Rendering GIF…" : "GIF animated"}</button><button disabled={Boolean(exporting)} onClick={() => void runAnimatedExport("video")}>{exporting === "video" ? "Recording video…" : "Video WebM"}</button><button disabled={Boolean(exporting)} onClick={() => exportWorkspaceJson(document)}>Workspace JSON</button></div></details>
+          <button aria-label="Start presentation" className="present" disabled={document.nodes.length === 0} onClick={startPresenting} title="Present scenes (Esc to exit)">▶ Present</button>
           <button aria-label="Open configuration" onClick={() => setConfigOpen(true)}>Config</button>
           <button className="share" disabled title="Cloud sharing requires a project backend">Share</button>
         </div>
@@ -358,8 +505,8 @@ export function EditorShell() {
 
       <section className="workspace">
         <aside className={`library-panel${libraryCollapsed ? " is-collapsed" : ""}`}>
-          <button aria-label={libraryCollapsed ? "Expand left panel" : "Collapse left panel"} className="library-collapse" onClick={() => setLibraryCollapsed((value) => !value)}>{libraryCollapsed ? "›" : "‹"}</button>
-          <div aria-hidden="true" className="library-resizer" onPointerDown={startLibraryResize} />
+          <button aria-label={libraryCollapsed ? "Expand left panel" : "Collapse left panel"} className="library-collapse" onClick={() => animateLayout(() => setLibraryCollapsed((value) => !value))}>{libraryCollapsed ? "›" : "‹"}</button>
+          <div aria-hidden="true" className="library-resizer" onPointerDown={(event) => startResize(event, "left")} />
           <div className="panel-heading"><span>WORKSPACES</span><button aria-label="Create workspace" className="panel-add" onClick={createWorkspace}>＋</button></div>
           <div className="workspace-list">{workspaces.map((workspace, index) => <button className={workspace.id === activeWorkspaceId ? "active" : ""} key={workspace.id} onClick={() => { setActiveWorkspaceId(workspace.id); setSelectedNodeIds([]); setSelectedEdgeIds([]); }}><i>{String(index + 1).padStart(2, "0")}</i><span>{workspace.workspaceTitle ?? workspace.title}</span><small>{workspace.scenes?.length ?? 1}</small></button>)}</div>
           <div className="workspace-manager">
@@ -383,8 +530,8 @@ export function EditorShell() {
             <div><span>{document.mode.toUpperCase()} / {intent.toUpperCase()}</span><h1>{document.title}</h1><p>{document.purpose}</p></div>
             <GlobalAiComposer hasNodes={document.nodes.length > 0} currentFormat={document.format ?? "16:9"} />
           </div>
-          <div className="canvas-stage" data-format={document.format ?? "16:9"}>
-            <AssistedCanvas document={document} externalRevision={externalRevision} onDocumentChange={updateWorkspace} onSelectionChange={handleSelection} ref={canvasRef} />
+          <div className={`canvas-stage${sceneTransition ? " is-scene-change" : ""}`} data-format={document.format ?? "16:9"}>
+            <AssistedCanvas document={document} externalRevision={externalRevision} onDocumentChange={updateWorkspace} onSelectionChange={handleSelection} presenting={presenting} ref={canvasRef} />
             <ProposalControls />
           </div>
           <div className="scene-strip">
@@ -394,8 +541,9 @@ export function EditorShell() {
           </div>
         </section>
 
-        <aside className="inspector-panel">
-          <div aria-hidden="true" className="inspector-resizer" onPointerDown={startInspectorResize} />
+        <aside className={`inspector-panel${inspectorCollapsed ? " is-collapsed" : ""}`}>
+          <button aria-label={inspectorCollapsed ? "Expand right panel" : "Collapse right panel"} className="inspector-collapse" onClick={() => animateLayout(() => setInspectorCollapsed((value) => !value))}>{inspectorCollapsed ? "‹" : "›"}</button>
+          <div aria-hidden="true" className="inspector-resizer" onPointerDown={(event) => startResize(event, "right")} />
           <div className="panel-heading"><span>INSPECTOR</span><i className="live-dot" /></div>
           {selectedEdges.length ? (
             <section className="selection-editor edge-editor">
@@ -487,8 +635,8 @@ export function EditorShell() {
               <input aria-label="Component border width" className="line-thickness" type="range" min="1" max="4" step="0.2" value={selectedNodes[0]?.borderWidth ?? 1} onChange={(event) => updateSelected({ borderWidth: Number(event.target.value) })} />
               <span>Size · {Math.round(selectedNodes[0]?.size.width ?? 220)} × {Math.round(selectedNodes[0]?.size.height ?? 104)}</span>
               <div className="size-editor">
-                <label>W<input aria-label="Component width" type="number" min={structureRoles.has(selectedNodes[0]?.role) ? 280 : 140} max={structureRoles.has(selectedNodes[0]?.role) ? 1400 : 440} value={Math.round(selectedNodes[0]?.size.width ?? 220)} onChange={(event) => updateSelected({ size: { width: Number(event.target.value), height: selectedNodes[0]?.size.height ?? 104 } })} /></label>
-                <label>H<input aria-label="Component height" type="number" min={structureRoles.has(selectedNodes[0]?.role) ? 160 : 72} max={structureRoles.has(selectedNodes[0]?.role) ? 900 : 260} value={Math.round(selectedNodes[0]?.size.height ?? 104)} onChange={(event) => updateSelected({ size: { width: selectedNodes[0]?.size.width ?? 220, height: Number(event.target.value) } })} /></label>
+                <label>W<input aria-label="Component width" type="number" min={structureRoles.has(selectedNodes[0]?.role) ? 280 : 140} max={structureRoles.has(selectedNodes[0]?.role) ? 1400 : 440} value={Math.round(selectedNodes[0]?.size.width ?? 220)} onChange={(event) => updateSelected({ size: { width: numberFieldValue(event.target.value, selectedNodes[0]?.size.width ?? 220, structureRoles.has(selectedNodes[0]?.role) ? 280 : 140, structureRoles.has(selectedNodes[0]?.role) ? 1400 : 440), height: selectedNodes[0]?.size.height ?? 104 } })} /></label>
+                <label>H<input aria-label="Component height" type="number" min={structureRoles.has(selectedNodes[0]?.role) ? 160 : 72} max={structureRoles.has(selectedNodes[0]?.role) ? 900 : 260} value={Math.round(selectedNodes[0]?.size.height ?? 104)} onChange={(event) => updateSelected({ size: { width: selectedNodes[0]?.size.width ?? 220, height: numberFieldValue(event.target.value, selectedNodes[0]?.size.height ?? 104, structureRoles.has(selectedNodes[0]?.role) ? 160 : 72, structureRoles.has(selectedNodes[0]?.role) ? 900 : 260) } })} /></label>
               </div>
               <span>Effect</span>
               <div className="effect-picker effect-picker--node">
@@ -506,12 +654,14 @@ export function EditorShell() {
               <span>Background opacity · {Math.round((selectedNodes[0]?.backgroundOpacity ?? 0.28) * 100)}%</span>
               <input aria-label="Component background opacity" className="line-thickness" disabled={selectedNodes.every((node) => !node.backgroundImage)} type="range" min="0" max="1" step="0.05" value={selectedNodes[0]?.backgroundOpacity ?? 0.28} onChange={(event) => updateSelected({ backgroundOpacity: Number(event.target.value) })} />
               <span>Layer · z {selectedNodes[0]?.zIndex ?? 1}</span>
-              <div className="z-index-editor"><button onClick={() => updateSelected({ zIndex: Math.max(-20, (selectedNodes[0]?.zIndex ?? 1) - 1) })}>Send back</button><input aria-label="Component z-index" type="number" min="-20" max="100" value={selectedNodes[0]?.zIndex ?? 1} onChange={(event) => updateSelected({ zIndex: Number(event.target.value) })} /><button onClick={() => updateSelected({ zIndex: Math.min(100, (selectedNodes[0]?.zIndex ?? 1) + 1) })}>Bring front</button></div>
+              <div className="z-index-editor"><button onClick={() => updateSelected({ zIndex: Math.max(-20, (selectedNodes[0]?.zIndex ?? 1) - 1) })}>Send back</button><input aria-label="Component z-index" type="number" min="-20" max="100" value={selectedNodes[0]?.zIndex ?? 1} onChange={(event) => updateSelected({ zIndex: numberFieldValue(event.target.value, selectedNodes[0]?.zIndex ?? 1, -20, 100) })} /><button onClick={() => updateSelected({ zIndex: Math.min(100, (selectedNodes[0]?.zIndex ?? 1) + 1) })}>Bring front</button></div>
               <span>Technology icon</span>
-              <div className="icon-picker">
-                <button aria-label="No technology icon" className={selectedNodes.every((node) => !node.technology) ? "active" : ""} onClick={() => updateSelected({ technology: undefined })}>—</button>
-                {technologyOptions.map((technology) => <button aria-label={`Use ${technology.label} icon`} className={selectedNodes.every((node) => node.technology === technology.id) ? "active" : ""} key={technology.id} onClick={() => updateSelected({ technology: technology.id })}><TechnologyIcon technology={technology.id} /></button>)}
-              </div>
+              <IconPicker
+                matches={(technology) => technology === undefined
+                  ? selectedNodes.every((node) => !node.technology)
+                  : selectedNodes.every((node) => node.technology === technology)}
+                onSelect={(technology) => updateSelected({ technology })}
+              />
               <button className="delete-selection" onClick={() => canvasRef.current?.deleteSelection(selectedNodeIds, [])}>Delete component{selectedNodeIds.length > 1 ? "s" : ""}</button>
             </section>
           ) : <section className="selection-empty"><label>SELECTION</label><p>Select components or connections to edit their visual and technical properties.</p></section>}
@@ -521,6 +671,16 @@ export function EditorShell() {
           <section className="quality"><label>QUALITY CHECKS</label><p><i /> Named ports</p><p><i /> Snap-to-grid</p><p><i /> Typed AI plan</p></section>
         </aside>
       </section>
+      {presenting ? (
+        <div aria-label="Presentation controls" className="present-bar" role="group">
+          <button aria-label="Previous scene" disabled={activeSceneIndex === 0} onClick={() => goToScene(activeSceneIndex - 1)}>‹</button>
+          <b>{scenes[activeSceneIndex]?.name ?? document.title}</b>
+          <span>{activeSceneIndex + 1} / {scenes.length}</span>
+          <button aria-label="Next scene" disabled={activeSceneIndex >= scenes.length - 1} onClick={() => goToScene(activeSceneIndex + 1)}>›</button>
+          <i />
+          <button className="present-exit" onClick={stopPresenting}>Exit <kbd>Esc</kbd></button>
+        </div>
+      ) : null}
       <AiConnectionSettings open={configOpen} onClose={() => setConfigOpen(false)} />
     </main>
     </AiAssistantProvider>

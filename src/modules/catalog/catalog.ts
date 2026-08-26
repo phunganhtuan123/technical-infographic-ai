@@ -96,3 +96,60 @@ export function technologyBadge(technology?: string, provider?: string) {
   if (details) return details.badge;
   return provider?.toUpperCase().slice(0, 4);
 }
+
+// ---------------------------------------------------------------------------
+// Brand icons beyond the curated set.
+//
+// The 44 entries above are curated: they carry a category, a fallback glyph and
+// a lane, and they are what the component library offers as draggable
+// primitives. Everything else simple-icons ships (3,400+ marks) is reachable by
+// slug from the Inspector's icon search. That whole set is ~5 MB of path data,
+// so it is imported dynamically and only the first time something asks for it.
+// ---------------------------------------------------------------------------
+
+export type BrandIcon = { title: string; slug: string; hex: string; path: string };
+
+let brandIndex: Map<string, BrandIcon> | undefined;
+let brandRequest: Promise<Map<string, BrandIcon>> | undefined;
+const brandListeners = new Set<() => void>();
+
+export function subscribeBrandIcons(listener: () => void) {
+  brandListeners.add(listener);
+  return () => {
+    brandListeners.delete(listener);
+  };
+}
+
+export function brandIconsSnapshot() {
+  return brandIndex;
+}
+
+export function ensureBrandIcons() {
+  if (brandIndex) return Promise.resolve(brandIndex);
+  brandRequest ??= import("simple-icons").then((module) => {
+    const index = new Map<string, BrandIcon>();
+    for (const value of Object.values(module) as Array<Partial<BrandIcon>>) {
+      if (value && typeof value.slug === "string" && typeof value.path === "string") {
+        index.set(value.slug, value as BrandIcon);
+      }
+    }
+    brandIndex = index;
+    for (const listener of brandListeners) listener();
+    return index;
+  });
+  return brandRequest;
+}
+
+export function searchBrandIcons(query: string, limit = 60) {
+  const trimmed = query.trim().toLowerCase();
+  if (!brandIndex || trimmed.length < 2) return [];
+  const starts: BrandIcon[] = [];
+  const contains: BrandIcon[] = [];
+  for (const icon of brandIndex.values()) {
+    const title = icon.title.toLowerCase();
+    if (title.startsWith(trimmed) || icon.slug.startsWith(trimmed)) starts.push(icon);
+    else if (title.includes(trimmed) || icon.slug.includes(trimmed)) contains.push(icon);
+    if (starts.length >= limit) break;
+  }
+  return [...starts, ...contains].slice(0, limit);
+}

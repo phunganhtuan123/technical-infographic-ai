@@ -9,7 +9,7 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "ai:local": "node ../local-ai-connector/src/server.mjs"
+    "ai:local": "node tools/local-ai-connector/src/server.mjs"
   },
   "dependencies": {
     "@xyflow/react": "12.11.3",

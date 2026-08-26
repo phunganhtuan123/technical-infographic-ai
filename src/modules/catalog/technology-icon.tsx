@@ -7,7 +7,8 @@ import {
   siPython, siRabbitmq, siRedis, siRust, siSpringboot, siSqlite, siSupabase,
   siTerraform, siTypescript, type SimpleIcon,
 } from "simple-icons";
-import { technologyDetails, type TechnologyId } from "./catalog";
+import { useSyncExternalStore } from "react";
+import { brandIconsSnapshot, ensureBrandIcons, subscribeBrandIcons, technologyDetails, type TechnologyId } from "./catalog";
 
 type TechnologyIconProps = {
   technology?: string;
@@ -52,20 +53,30 @@ const brandIcons: Partial<Record<TechnologyId, SimpleIcon>> = {
 
 export function TechnologyIcon({ technology, provider, compact = false }: TechnologyIconProps) {
   const details = technologyDetails(technology);
-  const badge = details?.badge ?? provider?.toUpperCase().slice(0, 3);
+  // Anything outside the curated catalog is looked up by simple-icons slug. The
+  // index arrives asynchronously, so subscribe rather than read once.
+  const index = useSyncExternalStore(subscribeBrandIcons, brandIconsSnapshot, () => undefined);
+  const needsIndex = Boolean(technology) && !details;
+  if (needsIndex && !index) void ensureBrandIcons();
+  const dynamicIcon = needsIndex ? index?.get(technology!) : undefined;
+
+  const label = details?.label ?? dynamicIcon?.title ?? provider;
+  const badge = details?.badge ?? dynamicIcon?.title.slice(0, 2).toUpperCase() ?? provider?.toUpperCase().slice(0, 3);
   if (!badge) return null;
   const glyph = details?.glyph ?? "letters";
   const brandIcon = details ? brandIcons[technology as TechnologyId] : undefined;
+  const path = brandIcon?.path ?? dynamicIcon?.path;
+  const color = details?.color ?? (dynamicIcon ? `#${dynamicIcon.hex}` : "var(--node-color)");
 
   return (
     <span
-      aria-label={details?.label ?? provider}
+      aria-label={label}
       className={`technology-mark${compact ? " is-compact" : ""}`}
-      style={{ "--technology-color": details?.color ?? "var(--node-color)" } as React.CSSProperties}
-      title={details?.label ?? provider}
+      style={{ "--technology-color": color } as React.CSSProperties}
+      title={label}
     >
-      <svg aria-hidden="true" className={brandIcon ? "is-brand" : undefined} viewBox="0 0 24 24">
-        {brandIcon ? <path d={brandIcon.path} /> : <Glyph badge={badge} glyph={glyph} />}
+      <svg aria-hidden="true" className={path ? "is-brand" : undefined} viewBox="0 0 24 24">
+        {path ? <path d={path} /> : <Glyph badge={badge} glyph={glyph} />}
       </svg>
     </span>
   );

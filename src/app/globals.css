@@ -21,7 +21,7 @@
 }
 
 * { box-sizing: border-box; }
-html, body { width: 100%; min-width: 1120px; height: 100%; margin: 0; overflow: hidden; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 body {
   background: var(--bg);
   color: var(--text);
@@ -32,7 +32,14 @@ button, input, select { font: inherit; }
 button { color: inherit; }
 button:disabled { cursor: not-allowed !important; }
 
-.app-shell { min-height: 100%; background: var(--bg); }
+/* Fix 13 — the shell, not the body, is the horizontal scroll container, so a
+   window narrower than the panels can still be scrolled instead of clipped. */
+.app-shell { min-width: 1120px; height: 100%; overflow-x: auto; overflow-y: hidden; background: var(--bg); }
+/* Fix 01 + 10 — grid columns animate only during a collapse/expand, never while
+   the pointer is dragging a resizer and never while the window is being resized. */
+.app-shell.is-animating .workspace, .app-shell.is-animating .topbar { transition: grid-template-columns 160ms var(--ease); }
+.app-shell.is-resizing .workspace, .app-shell.is-resizing .topbar { transition: none; }
+.app-shell.is-resizing { cursor: ew-resize; user-select: none; }
 .topbar {
   height: 56px;
   display: grid;
@@ -64,20 +71,37 @@ button:disabled { cursor: not-allowed !important; }
 .export-menu > div button { width: 100%; text-align: left; }
 .top-actions button:disabled, .prompt-box button:disabled, .scene:disabled, .add-scene:disabled, .segmented button:disabled { opacity: .56; }
 
-.workspace { height: calc(100vh - 56px); display: grid; grid-template-columns: var(--library-width, 280px) minmax(680px, 1fr) var(--inspector-width, 280px); transition: grid-template-columns 160ms var(--ease); }
+/* Fix 06 — the canvas column must be allowed to shrink, otherwise the drag hits
+   an invisible wall and the far panel is clipped. The real minimum is enforced
+   while dragging in editor-shell.tsx, where the live window width is known. */
+.workspace { height: calc(100vh - 56px); display: grid; grid-template-columns: var(--library-width, 280px) minmax(0, 1fr) var(--inspector-width, 280px); transition: none; }
 .library-panel, .inspector-panel { position: relative; z-index: 5; background: #0c0c0c; }
 .library-panel { height: 100%; border-right: 1px solid var(--border); padding: 18px 14px; overflow-y: auto; scrollbar-color: var(--border-strong) transparent; }
-.library-panel.is-collapsed { padding: 18px 8px; overflow: hidden; }
-.library-panel.is-collapsed > :not(.library-collapse):not(.library-resizer) { display: none; }
-.library-collapse { position: absolute; z-index: 12; top: 18px; right: 44px; width: 24px; height: 24px; display: grid; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text-secondary); cursor: pointer; }
+.library-panel.is-collapsed, .inspector-panel.is-collapsed { padding: 18px 8px; overflow: hidden; }
+/* Fix 08 — collapsing fades the panel body out instead of cutting it with
+   display:none, which cannot be animated. */
+.library-panel > :not(.library-collapse):not(.library-resizer),
+.inspector-panel > :not(.inspector-collapse):not(.inspector-resizer) { transition: opacity 120ms var(--ease); }
+.library-panel.is-collapsed > :not(.library-collapse):not(.library-resizer),
+.inspector-panel.is-collapsed > :not(.inspector-collapse):not(.inspector-resizer) { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 120ms var(--ease), visibility 0s 120ms; }
+.library-collapse, .inspector-collapse { position: absolute; z-index: 12; top: 18px; width: 24px; height: 24px; display: grid; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text-secondary); cursor: pointer; }
+.library-collapse { right: 44px; }
 .library-panel.is-collapsed .library-collapse { right: 13px; }
-.library-resizer { position: fixed; z-index: 20; top: 56px; bottom: 0; left: calc(var(--library-width, 280px) - 3px); width: 6px; cursor: ew-resize; }
-.library-resizer:hover::after { content: ""; position: absolute; left: 2px; top: 0; bottom: 0; width: 1px; background: var(--cyan); box-shadow: 0 0 8px rgba(99,230,255,.35); }
-.library-panel.is-collapsed .library-resizer { display: none; }
+.inspector-collapse { left: 14px; }
+.inspector-panel.is-collapsed .inspector-collapse { left: 13px; }
+/* Fix 05 — the resizer lives inside its panel, so it can never drift away from
+   the panel edge while the column is still animating. */
+.library-resizer, .inspector-resizer { position: absolute; z-index: 20; top: 0; bottom: 0; width: 7px; cursor: ew-resize; touch-action: none; }
+.library-resizer { right: 0; }
+.inspector-resizer { left: 0; }
+.library-resizer:hover::after, .app-shell.is-resizing .library-resizer::after { content: ""; position: absolute; right: 3px; top: 0; bottom: 0; width: 1px; background: var(--cyan); box-shadow: 0 0 8px rgba(99,230,255,.35); }
+.inspector-resizer:hover::after, .app-shell.is-resizing .inspector-resizer::after { content: ""; position: absolute; left: 3px; top: 0; bottom: 0; width: 1px; background: var(--violet); box-shadow: 0 0 8px rgba(167,139,250,.4); }
+.library-panel.is-collapsed .library-resizer, .inspector-panel.is-collapsed .inspector-resizer { display: none; }
 .inspector-panel { border-left: 1px solid var(--border); }
-.inspector-resizer { position: fixed; z-index: 20; top: 56px; bottom: 0; right: calc(var(--inspector-width, 280px) - 3px); width: 6px; cursor: ew-resize; }
-.inspector-resizer:hover::after { content: ""; position: absolute; left: 3px; top: 0; bottom: 0; width: 1px; background: var(--violet); box-shadow: 0 0 8px rgba(167,139,250,.4); }
 .panel-heading { min-height: 24px; display: flex; align-items: center; justify-content: space-between; color: var(--text-muted); font-size: 10px; letter-spacing: .12em; }
+/* Fix 09 — room for the inspector's collapse button, which sits where the
+   heading would otherwise start. */
+.inspector-panel > .panel-heading { padding-left: 30px; }
 .panel-heading kbd { padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-muted); background: var(--surface); font-weight: 400; }
 .library-view-switch { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 .library-view-switch button { padding: 3px 5px; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); font-size: 8px; cursor: pointer; }
@@ -275,7 +299,19 @@ button:disabled { cursor: not-allowed !important; }
 .config-dialog > footer { display: flex; align-items: center; gap: 9px; padding: 13px 20px; border-top: 1px solid var(--border); background: #0a0a0a; }
 .config-dialog > footer > span { color: var(--text-muted); font-size: 8px; letter-spacing: .12em; }
 .config-dialog > footer code { padding: 5px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--cyan); background: #111; font-size: 8px; }
-.config-dialog > footer small { margin-left: auto; color: var(--text-muted); font-size: 8px; }
+.config-dialog > footer small { margin-left: auto; color: var(--text-muted); font-size: 8px; text-align: right; }
+
+/* A local connection the browser or the machine cannot provide is shown as
+   unavailable with the reason attached, rather than as a button that fails. */
+.ai-connection-grid article.is-unavailable { border-style: dashed; border-color: #2c2c2c; background: #0e0e0e; }
+.ai-connection-grid article.is-unavailable .connection-mark, .ai-connection-grid article.is-unavailable strong, .ai-connection-grid article.is-unavailable p { opacity: .5; }
+.ai-connection-grid article.is-unavailable > button { border-color: #333; background: #131313; color: var(--text-muted); }
+.ai-connection-grid small.blocked-note { display: block; color: var(--amber); line-height: 1.5; }
+.config-dialog > footer.is-warning { border-top-color: #3a2f12; background: #0d0b06; }
+.config-dialog > footer.is-warning code { color: var(--amber); border-color: #3a2f12; }
+.config-dialog > footer .recheck { height: 26px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text-secondary); font-size: 8px; letter-spacing: .06em; cursor: pointer; }
+.config-dialog > footer .recheck:hover:not(:disabled) { border-color: #4a4a4a; color: var(--text); }
+.config-dialog > footer .recheck:disabled { opacity: .5; }
 
 .canvas-stage { min-width: 0; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; container-type: size; background: #050505; }
 .proposal-controls { min-width: 390px; position: absolute; z-index: 98; left: 50%; bottom: 18px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 11px 12px; border: 1px solid #355221; border-radius: 11px; background: rgba(12,12,12,.94); box-shadow: 0 18px 52px rgba(0,0,0,.5), 0 0 28px rgba(182,255,92,.05); backdrop-filter: blur(16px); transform: translateX(-50%); }
@@ -305,6 +341,14 @@ button:disabled { cursor: not-allowed !important; }
 .canvas-toolbar button:hover { color: var(--text); border-color: #444; }
 .canvas-toolbar button:disabled { opacity: .45; }
 .canvas-toolbar span { padding: 0 8px; color: var(--text-muted); font-size: 9px; }
+.canvas-toolbar-divider { width: 1px; height: 16px; margin: 0 1px; background: var(--border); }
+.canvas-toolbar .zoom-readout { min-width: 48px; text-align: center; font-variant-numeric: tabular-nums; }
+.canvas-toolbar button[aria-label="Undo"], .canvas-toolbar button[aria-label="Redo"] { min-width: 28px; font-size: 13px; line-height: 1; }
+.canvas-toolbar button[aria-label="Zoom in"], .canvas-toolbar button[aria-label="Zoom out"] { min-width: 26px; font-size: 13px; line-height: 1; }
+
+.react-flow__minimap { margin: 0 14px 14px 0 !important; border: 1px solid var(--border); border-radius: 9px; background: rgba(10,10,10,.92) !important; box-shadow: 0 12px 30px rgba(0,0,0,.45); }
+.react-flow__minimap-mask { fill: rgba(5,5,5,.72); }
+.react-flow__minimap svg { border-radius: 8px; }
 .alignment-guide { position: absolute; z-index: 8; pointer-events: none; background: color-mix(in srgb, var(--cyan) 72%, transparent); box-shadow: 0 0 8px rgba(99,230,255,.28); }
 .alignment-guide--vertical { top: 0; bottom: 0; width: 1px; }
 .alignment-guide--horizontal { left: 0; right: 0; height: 1px; }
@@ -537,7 +581,10 @@ button:disabled { cursor: not-allowed !important; }
 .text-align-picker { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
 .text-align-picker button { height: 30px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text-muted); font-size: 9px; text-transform: capitalize; cursor: pointer; }
 .text-align-picker button.active { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); background: rgba(182,255,92,.045); color: var(--accent); }
-.icon-picker { max-height: 116px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; padding-right: 2px; overflow-y: auto; }
+.icon-search { height: 30px; margin: 2px 0 6px; }
+.icon-search input { font-size: 10.5px; }
+.icon-picker { max-height: 168px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; padding-right: 2px; overflow-y: auto; scrollbar-color: var(--border-strong) transparent; }
+.icon-picker-status { margin: 6px 0 0; color: var(--text-muted); font-size: 9px; letter-spacing: .04em; }
 .icon-picker > button { height: 34px; display: grid; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text-muted); cursor: pointer; }
 .icon-picker > button:hover { border-color: var(--border-strong); background: var(--surface-raised); }
 .icon-picker > button.active { border-color: color-mix(in srgb, var(--accent) 48%, var(--border)); background: rgba(182,255,92,.045); color: var(--accent); }
@@ -605,6 +652,40 @@ button:disabled { cursor: not-allowed !important; }
 .inspector-panel .selection-editor input, .inspector-panel .selection-editor select, .inspector-panel .selection-empty p, .inspector-panel .selection-editor p, .inspector-panel dl, .inspector-panel .toggle-row span { color: #b5b5b5; font-size: 11px; }
 .inspector-panel .line-style-picker button, .inspector-panel .effect-picker button, .inspector-panel .connection-preview > span, .inspector-panel .focus-ai, .inspector-panel .delete-selection { font-size: 10px; }
 
+/* ------------------------------------------------------------------ *
+ * Presentation mode — Scenes become slides. All editing chrome steps
+ * aside, the canvas keeps whatever format the workspace is set to, and
+ * the control bar stays faint until it is pointed at.
+ * ------------------------------------------------------------------ */
+.top-actions .present { border-color: #3d5522; color: var(--accent); }
+.app-shell.is-presenting { overflow: hidden; }
+.app-shell.is-presenting .topbar,
+.app-shell.is-presenting .library-panel,
+.app-shell.is-presenting .inspector-panel,
+.app-shell.is-presenting .story-header,
+.app-shell.is-presenting .scene-strip,
+.app-shell.is-presenting .canvas-toolbar,
+.app-shell.is-presenting .react-flow__minimap,
+.app-shell.is-presenting .ai-session-panel { display: none; }
+.app-shell.is-presenting .workspace { height: 100vh; grid-template-columns: minmax(0, 1fr); }
+.app-shell.is-presenting .editor-main { grid-template-rows: minmax(0, 1fr); }
+.app-shell.is-presenting .canvas-stage { background: #030303; }
+.app-shell.is-presenting .canvas-wrap { box-shadow: 0 0 0 1px #1c1c1c, 0 40px 120px rgba(0,0,0,.7); }
+
+.canvas-stage.is-scene-change .canvas-wrap { animation: scene-enter 260ms var(--ease); }
+@keyframes scene-enter { from { opacity: 0; transform: translateY(10px) scale(.994); } to { opacity: 1; transform: none; } }
+
+.present-bar { position: fixed; z-index: 60; left: 50%; bottom: 22px; transform: translateX(-50%); display: flex; align-items: center; gap: 6px; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 999px; background: rgba(10,10,10,.88); box-shadow: 0 18px 44px rgba(0,0,0,.55); backdrop-filter: blur(14px); opacity: .28; transition: opacity 200ms var(--ease); }
+.present-bar:hover, .present-bar:focus-within { opacity: 1; }
+.present-bar button { min-width: 28px; height: 28px; padding: 0 9px; border: 1px solid transparent; border-radius: 999px; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.present-bar button:hover:not(:disabled) { border-color: var(--border); background: var(--surface); color: var(--text); }
+.present-bar button:disabled { opacity: .3; }
+.present-bar b { max-width: 260px; overflow: hidden; padding: 0 4px; color: var(--text); font-size: 10px; font-weight: 600; letter-spacing: .02em; text-overflow: ellipsis; white-space: nowrap; }
+.present-bar span { color: var(--text-muted); font-size: 9px; font-variant-numeric: tabular-nums; letter-spacing: .1em; }
+.present-bar > i { width: 1px; height: 16px; margin: 0 2px; background: var(--border); }
+.present-bar .present-exit { color: var(--accent); font-size: 10px; }
+.present-bar kbd { margin-left: 5px; padding: 2px 5px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-muted); font: inherit; font-size: 9px; }
+
 @keyframes card-reveal { from { opacity: 0; transform: translateY(8px); filter: blur(2px); } to { opacity: 1; transform: none; filter: none; } }
 @keyframes status-pulse { 0%, 70%, 100% { opacity: .38; box-shadow: none; } 80%, 92% { opacity: 1; box-shadow: 0 0 12px color-mix(in srgb, var(--node-color) 80%, transparent); } }
 @keyframes edge-trail { to { stroke-dashoffset: -42; } }
@@ -622,10 +703,12 @@ button:disabled { cursor: not-allowed !important; }
 @keyframes node-scan { from { background-position: 0 -120%; } to { background-position: 0 120%; } }
 @keyframes node-breathe { 0%, 100% { filter: none; } 50% { filter: drop-shadow(0 0 8px color-mix(in srgb, var(--node-color) 22%, transparent)); } }
 
+/* Fix 12 — no hard column swap at the breakpoint. The panel widths already come
+   from --library-width / --inspector-width, and the purpose line is clamped to a
+   single line instead of vanishing, so nothing jumps as the window crosses 1280. */
 @media (max-width: 1280px) {
-  .workspace { grid-template-columns: var(--library-width, 260px) minmax(680px, 1fr) var(--inspector-width, 240px); }
-  .topbar { grid-template-columns: var(--library-width, 260px) 1fr 370px; }
-  .story-header p { display: none; }
+  .story-header { gap: 16px; padding: 14px 18px; }
+  .story-header p { display: -webkit-box; -webkit-line-clamp: 1; line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
 }
 
 @media (prefers-reduced-motion: reduce) {

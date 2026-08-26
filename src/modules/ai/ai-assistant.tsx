@@ -308,7 +308,9 @@ export function AiAssistantProvider({ children, document, revision, selectedNode
   const accept = useCallback(async () => {
     if (!proposal || proposal.stale || proposal.building) return;
     const deletes = proposal.proposal.patches.filter((patch) => patch.op.startsWith("delete"));
-    if (deletes.length && !window.confirm(`Delete ${deletes.length} selected item${deletes.length === 1 ? "" : "s"}? This can be undone.`)) return;
+    // Accepting replaces the scene at the workspace level, past the canvas
+    // undo history — so this really is the last chance to say no.
+    if (deletes.length && !window.confirm(`Accept this proposal? It deletes ${deletes.length} item${deletes.length === 1 ? "" : "s"} and cannot be undone.`)) return;
     const acceptedDocument = acceptedPreview(proposal.document);
     onAccept(acceptedDocument, proposal.proposal.intent, proposal.proposal);
     if (session) {
@@ -441,11 +443,68 @@ export function GlobalAiComposer({ hasNodes, currentFormat }: { hasNodes: boolea
 
 const localConnectorUrl = "http://127.0.0.1:47821";
 
+// The Local buttons only work if a connector is answering on this machine AND
+// the browser is willing to let this page reach it. Chrome 142+ gates that
+// behind a Local Network Access prompt, Safari is stricter still, and a plain
+// click on a dead button just produces a cryptic failure. So probe first, and
+// keep the buttons off until we know they will do something.
+type LocalProbe =
+  | { state: "checking" }
+  | { state: "ready"; backends: string[] }
+  | { state: "unreachable"; reason: string };
+
+function useLocalConnector(open: boolean) {
+  const [probe, setProbe] = useState<LocalProbe>({ state: "checking" });
+
+  const check = useCallback(async () => {
+    setProbe({ state: "checking" });
+    try {
+      const response = await fetch(new URL("/.well-known/technical-infographic-ai", localConnectorUrl), {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!response.ok) throw new Error(`the connector answered ${response.status}`);
+      const metadata = await response.json() as { backends?: string[] };
+      setProbe({ state: "ready", backends: Array.isArray(metadata.backends) ? metadata.backends : [] });
+    } catch (error) {
+      // A blocked request and a connector that is not running both surface as
+      // the same opaque network error, so say both rather than guess.
+      const secure = typeof window !== "undefined" && window.location.protocol === "https:";
+      const reason = error instanceof DOMException && error.name === "TimeoutError"
+        ? "The connector did not answer in time."
+        : secure
+          ? "Either the connector is not running, or this browser is blocking a page on the web from reaching your machine."
+          : "The connector does not seem to be running.";
+      setProbe({ state: "unreachable", reason });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open) void check();
+  }, [check, open]);
+
+  return { probe, check };
+}
+
 export function AiConnectionSettings({ open, onClose }: { open: boolean; onClose(): void }) {
   const ai = useAiAssistant();
   const [gatewayUrl, setGatewayUrl] = useState("");
+  const { probe, check } = useLocalConnector(open);
   useEffect(() => { if (ai.gatewayOrigin && ai.gatewayOrigin !== "local-mock") setGatewayUrl(ai.gatewayOrigin); }, [ai.gatewayOrigin]);
   if (!open) return null;
+
+  const localReady = probe.state === "ready";
+  const localBusy = probe.state === "checking";
+  const has = (provider: string) => localReady && (probe.backends.length === 0 || probe.backends.includes(provider));
+  const unavailable = (provider: string, cli: string) => {
+    if (localBusy) return "Looking for a connector on this machine…";
+    if (probe.state === "unreachable") return `No connector on this machine. ${probe.reason} Start it with: npx technical-infographic-connector`;
+    if (!has(provider)) return `A connector is running, but it did not find the ${cli} on this machine.`;
+    return undefined;
+  };
+  const codexBlocked = unavailable("codex", "Codex CLI");
+  const claudeBlocked = unavailable("anthropic", "Claude CLI");
   const connect = (url: string, provider?: string) => void ai.connect(url, provider).catch(() => undefined);
   const activeProvider = ai.providers.find((provider) => provider.id === ai.providerId);
   return <div className="config-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
@@ -453,11 +512,25 @@ export function AiConnectionSettings({ open, onClose }: { open: boolean; onClose
       <header><div><span>CONFIGURATION</span><h2>AI connections</h2><p>Use AI authenticated and owned by this client.</p></div><button aria-label="Close configuration" onClick={onClose}>×</button></header>
       <div className={`ai-config-status${ai.connected ? " is-connected" : ""}`}><i /><div><strong>{ai.connected ? activeProvider?.label ?? "Client AI connected" : "No active AI connection"}</strong><small>{ai.status}{ai.gatewayOrigin ? ` · ${ai.gatewayOrigin}` : ""}</small></div>{ai.connected ? <><button onClick={ai.disconnect}>Disconnect</button><button onClick={ai.forgetGateway}>Forget</button></> : null}</div>
       <div className="ai-connection-grid">
-        <article><div className="connection-mark is-codex">CX</div><div><strong>Codex Local</strong><p>Use the Codex CLI login on this machine. No OpenAI API key enters the editor.</p><small>Requires Local AI Connector and `codex login`.</small></div><button disabled={ai.busy} onClick={() => connect(localConnectorUrl, "codex")}>Connect Codex</button></article>
-        <article><div className="connection-mark is-claude">CL</div><div><strong>Claude Local</strong><p>Use the Claude Console login held by the local `ant` CLI.</p><small>Requires Local AI Connector and `ant auth login`.</small></div><button disabled={ai.busy} onClick={() => connect(localConnectorUrl, "anthropic")}>Connect Claude</button></article>
+        <article className={codexBlocked ? "is-unavailable" : ""} title={codexBlocked}>
+          <div className="connection-mark is-codex">CX</div>
+          <div><strong>Codex Local</strong><p>Use the Codex CLI login on this machine. No OpenAI API key enters the editor.</p>{codexBlocked ? <small className="blocked-note">{codexBlocked}</small> : <small>Ready — the connector found the Codex CLI here.</small>}</div>
+          <button disabled={ai.busy || Boolean(codexBlocked)} onClick={() => connect(localConnectorUrl, "codex")} title={codexBlocked}>Connect Codex</button>
+        </article>
+        <article className={claudeBlocked ? "is-unavailable" : ""} title={claudeBlocked}>
+          <div className="connection-mark is-claude">CL</div>
+          <div><strong>Claude Local</strong><p>Use the Claude Code login already held by the CLI on this machine.</p>{claudeBlocked ? <small className="blocked-note">{claudeBlocked}</small> : <small>Ready — the connector found the Claude CLI here.</small>}</div>
+          <button disabled={ai.busy || Boolean(claudeBlocked)} onClick={() => connect(localConnectorUrl, "anthropic")} title={claudeBlocked}>Connect Claude</button>
+        </article>
         <article className="is-organization"><div className="connection-mark is-gateway">GW</div><div><strong>Organization Gateway</strong><p>Connect to an AI Gateway controlled by your organization through SSO.</p><input aria-label="Organization AI Gateway URL" inputMode="url" placeholder="https://ai.your-company.com" value={gatewayUrl} onChange={(event) => setGatewayUrl(event.target.value)} /></div><button disabled={ai.busy || !gatewayUrl.trim()} onClick={() => connect(gatewayUrl)}>Continue with SSO</button></article>
       </div>
-      <footer><span>LOCAL CONNECTOR</span><code>npm run ai:local</code><small>Runs on 127.0.0.1 only. Credentials remain in Codex or Claude CLI storage.</small></footer>
+      <footer className={probe.state === "unreachable" ? "is-warning" : ""}>
+        <span>LOCAL CONNECTOR</span>
+        {probe.state === "ready"
+          ? <><code>connected · {probe.backends.length ? probe.backends.join(", ") : "no backend reported"}</code><small>Running on 127.0.0.1 only. Credentials stay in the CLI that owns them.</small></>
+          : <><code>npx technical-infographic-connector</code><small>{probe.state === "checking" ? "Looking for a connector on this machine…" : `${probe.reason} Run the command above in a terminal, then check again.`}</small></>}
+        <button className="recheck" disabled={localBusy} onClick={() => void check()}>{localBusy ? "Checking…" : "Check again"}</button>
+      </footer>
     </section>
   </div>;
 }
