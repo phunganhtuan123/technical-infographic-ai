@@ -96,8 +96,13 @@ export function serializeWorkspaceFile(document: DiagramDocument) {
 }
 
 export function parseWorkspaceFile(contents: string): DiagramDocument {
-  const parsed = JSON.parse(contents) as unknown;
-  if (!parsed || typeof parsed !== "object") throw new Error("Workspace file must contain a JSON object");
+  return hydrateWorkspaceValue(JSON.parse(contents) as unknown);
+}
+
+// The same validation as an imported file, minus the round trip through a
+// string. What the API stores is exactly what this reads back.
+export function hydrateWorkspaceValue(parsed: unknown): DiagramDocument {
+  if (!parsed || typeof parsed !== "object") throw new Error("A workspace must be a JSON object");
   const envelope = parsed as Record<string, unknown>;
   const raw = (envelope.workspace && typeof envelope.workspace === "object" ? envelope.workspace : envelope) as Record<string, unknown>;
   const document = hydrateDiagram(raw);

@@ -1,11 +1,20 @@
 import { Handle, NodeResizer, Position, type Node, type NodeProps } from "@xyflow/react";
-import { createContext, useContext, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { createContext, useContext, useSyncExternalStore, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { ComponentIcon } from "@/modules/catalog/component-icon";
 import { TechnologyIcon } from "@/modules/catalog/technology-icon";
 import type { DiagramNode } from "@/modules/diagram/schema";
+import { assetsRevision, resolveAsset, serverAssetsRevision, subscribeAssets } from "@/modules/projects/asset-urls";
 
 export type SemanticNodeData = DiagramNode & Record<string, unknown>;
 export type SemanticFlowNode = Node<SemanticNodeData, "semantic">;
+// The background may be an uploaded asset, whose fetchable URL is signed and
+// short-lived. Subscribing means the picture appears as soon as the project's
+// asset list arrives, and again after the URLs are renewed.
+function useBackgroundUrl(reference: string | undefined) {
+  useSyncExternalStore(subscribeAssets, assetsRevision, serverAssetsRevision);
+  return resolveAsset(reference);
+}
+
 export const NodeInlineEditContext = createContext<(nodeId: string, updates: Pick<DiagramNode, "label"> | Pick<DiagramNode, "detail">) => void>(() => undefined);
 export const ContainerLabelMoveContext = createContext<(nodeId: string, labelPosition: NonNullable<DiagramNode["labelPosition"]>) => void>(() => undefined);
 
@@ -58,6 +67,7 @@ function containerLabelStyle(position: NonNullable<DiagramNode["labelPosition"]>
 export function SemanticNode({ data, selected }: NodeProps<SemanticFlowNode>) {
   const editNode = useContext(NodeInlineEditContext);
   const moveContainerLabel = useContext(ContainerLabelMoveContext);
+  const backgroundUrl = useBackgroundUrl(data.backgroundImage);
   const shape = data.role in flowShapes ? flowShapes[data.role as keyof typeof flowShapes] : undefined;
   const label = selected ? <InlineField ariaLabel="Inline component name" className="node-inline-name" value={data.label} onChange={(value) => editNode(data.id, { label: value })} /> : <strong>{data.label}</strong>;
   const detail = selected ? <InlineField ariaLabel="Inline component description" className="node-inline-detail" value={data.detail ?? ""} onChange={(value) => editNode(data.id, { detail: value })} /> : null;
@@ -94,7 +104,7 @@ export function SemanticNode({ data, selected }: NodeProps<SemanticFlowNode>) {
       style={{ "--node-color": data.color, "--node-text-color": data.textColor ?? "#f5f5f5", "--node-font-family": fontFamilies[fontFamily], "--node-font-size": `${fontSize}px`, "--node-font-weight": fontWeight, "--node-text-align": textAlign, "--node-border-width": `${data.borderWidth}px`, "--node-speed": `${data.speed}s` } as React.CSSProperties}
     >
       <NodeResizer color={data.color} handleClassName="node-resize-handle" isVisible={selected} lineClassName="node-resize-line" minHeight={isContainer ? 160 : 72} minWidth={isContainer ? 280 : 140} maxHeight={isContainer ? 900 : 260} maxWidth={isContainer ? 1400 : 440} />
-      {data.backgroundImage ? <span aria-hidden="true" className="node-background" style={{ backgroundImage: `url(${JSON.stringify(data.backgroundImage)})`, backgroundPosition: "center", backgroundRepeat: "no-repeat", backgroundSize: data.backgroundFit ?? "cover", opacity: data.backgroundOpacity ?? 0.28 }} /> : null}
+      {backgroundUrl ? <span aria-hidden="true" className="node-background" style={{ backgroundImage: `url(${JSON.stringify(backgroundUrl)})`, backgroundPosition: "center", backgroundRepeat: "no-repeat", backgroundSize: data.backgroundFit ?? "cover", opacity: data.backgroundOpacity ?? 0.28 }} /> : null}
       {shape ? <svg className="node-shape" preserveAspectRatio="none" viewBox="0 0 220 104" aria-hidden="true"><path className={`node-shape-fill is-${data.borderStyle}`} d={shape} /></svg> : null}
       {!isContainer && !isAnnotation ? handles.flatMap(([id, position]) => [
         <Handle aria-hidden="true" className={`semantic-handle semantic-handle--${id} semantic-handle--target-pair`} id={`${id}--target`} key={`${id}-target`} position={position} type="target" />,

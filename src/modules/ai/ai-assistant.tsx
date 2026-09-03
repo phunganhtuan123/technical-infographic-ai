@@ -5,6 +5,7 @@ import { ZodError } from "zod";
 import type { DiagramDocument } from "@/modules/diagram/schema";
 import { buildProposalDocument, createProposalRevealFrames, decorateProposalDocument, proposalChangeCounts, validateProposal } from "./proposal-engine";
 import { sceneFingerprint, scopedDiagramContext } from "./context";
+import { rememberGatewayOrigin } from "@/modules/projects/user-settings";
 import { DirectGatewayConnector, MockGatewayConnector, clearClientGatewayUrl, discoverCapabilities, discoverClientGateway, saveClientGatewayUrl, savePendingProvider, savedClientGatewayUrl, takePendingProvider, type AiConnector, type AiProgress } from "./gateway";
 import { completePkceAuthorization, beginPkceAuthorization } from "./pkce";
 import { sanitizeDiagramImage } from "./image-input";
@@ -147,6 +148,8 @@ export function AiAssistantProvider({ children, document, revision, selectedNode
         localStorage.setItem(consentKey, new Date().toISOString());
       }
       saveClientGatewayUrl(discoveredGateway.origin);
+      // …and to the account, so a second machine does not ask for it again.
+      void rememberGatewayOrigin(discoveredGateway.origin);
       savePendingProvider(preferredProvider);
       await beginPkceAuthorization(nextMetadata);
     } catch (error) {

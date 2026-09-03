@@ -4,6 +4,7 @@ import { routeOrthogonal } from "@/modules/canvas/orthogonal-router";
 import { Position } from "@xyflow/react";
 import { GIFEncoder, applyPalette, quantize } from "gifenc";
 import { serializeWorkspaceFile } from "@/modules/projects/workspace-file";
+import { inlineAssets } from "@/modules/projects/asset-urls";
 
 const nodeWidth = 220;
 const nodeHeight = 104;
@@ -299,22 +300,33 @@ function download(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function exportSvg(document: DiagramDocument) {
-  download(new Blob([renderDocumentSvg(document)], { type: "image/svg+xml" }), `${document.id}.svg`);
+// Every export inlines its images first. A signed asset URL expires within the
+// hour, so a file that merely points at one is broken before anybody opens it —
+// and for PNG it is worse than broken: an SVG referencing another origin taints
+// the canvas, and toBlob throws instead of saving.
+export async function exportSvg(document: DiagramDocument) {
+  const ready = await inlineAssets(document);
+  download(new Blob([renderDocumentSvg(ready)], { type: "image/svg+xml" }), `${ready.id}.svg`);
 }
 
-export function exportHtml(document: DiagramDocument) {
-  const svg = renderDocumentSvg(document);
-  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeXml(document.title)}</title><style>html,body{margin:0;background:#080808;display:grid;place-items:center;min-height:100%;overflow:hidden}svg{width:100%;height:100%;max-width:100vw;max-height:100vh}</style></head><body>${svg}</body></html>`;
-  download(new Blob([html], { type: "text/html" }), `${document.id}.html`);
+export async function exportHtml(document: DiagramDocument) {
+  const ready = await inlineAssets(document);
+  const svg = renderDocumentSvg(ready);
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeXml(ready.title)}</title><style>html,body{margin:0;background:#080808;display:grid;place-items:center;min-height:100%;overflow:hidden}svg{width:100%;height:100%;max-width:100vw;max-height:100vh}</style></head><body>${svg}</body></html>`;
+  download(new Blob([html], { type: "text/html" }), `${ready.id}.html`);
 }
 
-export function exportWorkspaceJson(document: DiagramDocument) {
-  download(new Blob([serializeWorkspaceFile(document)], { type: "application/json" }), `${document.id}.technical-infographic.json`);
+// The workspace file is inlined too. An asset reference means nothing to
+// somebody opening this on another account, and a portable file is the whole
+// point of an export.
+export async function exportWorkspaceJson(document: DiagramDocument) {
+  const ready = await inlineAssets(document);
+  download(new Blob([serializeWorkspaceFile(ready)], { type: "application/json" }), `${ready.id}.technical-infographic.json`);
 }
 
-export function exportPng(document: DiagramDocument) {
-  const svg = renderDocumentSvg(document, { animate: false });
+export async function exportPng(document: DiagramDocument) {
+  const ready = await inlineAssets(document);
+  const svg = renderDocumentSvg(ready, { animate: false });
   const image = new Image();
   const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
   image.onload = () => {
@@ -324,7 +336,7 @@ export function exportPng(document: DiagramDocument) {
     const context = canvas.getContext("2d");
     context?.scale(2, 2);
     context?.drawImage(image, 0, 0);
-    canvas.toBlob((blob) => { if (blob) download(blob, `${document.id}.png`); }, "image/png");
+    canvas.toBlob((blob) => { if (blob) download(blob, `${ready.id}.png`); }, "image/png");
     URL.revokeObjectURL(url);
   };
   image.src = url;
@@ -359,7 +371,10 @@ async function drawAnimationFrame(document: DiagramDocument, canvas: HTMLCanvasE
 }
 
 export async function exportGif(document: DiagramDocument) {
-  const size = rasterDimensions(document, 960);
+  // Same reason as the still exports, and one more: every frame is drawn onto a
+  // canvas, which an image from another origin would taint.
+  const ready = await inlineAssets(document);
+  const size = rasterDimensions(ready, 960);
   const canvas = window.document.createElement("canvas");
   canvas.width = size.width;
   canvas.height = size.height;
@@ -370,7 +385,7 @@ export async function exportGif(document: DiagramDocument) {
   const delay = Math.round(1000 / gifFramesPerSecond);
 
   for (let frame = 0; frame < frameCount; frame += 1) {
-    await drawAnimationFrame(document, canvas, frame / gifFramesPerSecond);
+    await drawAnimationFrame(ready, canvas, frame / gifFramesPerSecond);
     const rgba = context.getImageData(0, 0, canvas.width, canvas.height).data;
     const palette = quantize(rgba, 128, { format: "rgb565" });
     encoder.writeFrame(applyPalette(rgba, palette, "rgb565"), canvas.width, canvas.height, { palette, delay, repeat: 0 });
@@ -380,7 +395,7 @@ export async function exportGif(document: DiagramDocument) {
   encoder.finish();
   const bytes = encoder.bytes();
   const payload = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-  download(new Blob([payload], { type: "image/gif" }), `${document.id}.gif`);
+  download(new Blob([payload], { type: "image/gif" }), `${ready.id}.gif`);
 }
 
 function supportedVideoMimeType() {
@@ -392,7 +407,8 @@ export async function exportVideo(document: DiagramDocument) {
   if (typeof MediaRecorder === "undefined") throw new Error("Video export is not supported by this browser");
   const mimeType = supportedVideoMimeType();
   if (!mimeType) throw new Error("This browser cannot encode WebM video");
-  const size = rasterDimensions(document, 1920);
+  const ready = await inlineAssets(document);
+  const size = rasterDimensions(ready, 1920);
   const canvas = window.document.createElement("canvas");
   canvas.width = size.width;
   canvas.height = size.height;
@@ -410,13 +426,13 @@ export async function exportVideo(document: DiagramDocument) {
 
   try {
     for (let frame = 0; frame < frameCount; frame += 1) {
-      await drawAnimationFrame(document, canvas, frame / videoFramesPerSecond);
+      await drawAnimationFrame(ready, canvas, frame / videoFramesPerSecond);
       const wait = (frame + 1) * (1000 / videoFramesPerSecond) - (performance.now() - startedAt);
       if (wait > 0) await new Promise((resolve) => window.setTimeout(resolve, wait));
     }
     recorder.stop();
     await stopped;
-    download(new Blob(chunks, { type: mimeType }), `${document.id}.webm`);
+    download(new Blob(chunks, { type: mimeType }), `${ready.id}.webm`);
   } finally {
     stream.getTracks().forEach((track) => track.stop());
     if (recorder.state !== "inactive") recorder.stop();

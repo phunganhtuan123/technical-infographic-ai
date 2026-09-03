@@ -14,8 +14,13 @@ import type { DiagramDocument, DiagramFormat, DiagramScene, EdgeDirection, EdgeE
 import { exportGif, exportHtml, exportPng, exportSvg, exportVideo, exportWorkspaceJson } from "@/modules/export/export-document";
 import { architecturePlan } from "@/modules/fixtures/architecture-plan";
 import { diagramSamples } from "@/modules/fixtures/diagram-samples";
+import { AccountDialog, ConflictDialog, SyncBadge } from "@/modules/projects/account-panel";
+import { uploadAsset } from "@/modules/projects/api-client";
+import { assetIdOf, assetReference, rememberAsset } from "@/modules/projects/asset-urls";
+import { HistoryDialog } from "@/modules/projects/history-panel";
+import { useCloudSync } from "@/modules/projects/cloud-sync";
 import { loadWorkspaceState, saveWorkspaceState } from "@/modules/projects/local-project-store";
-import { parseWorkspaceFile } from "@/modules/projects/workspace-file";
+import { hydrateWorkspaceValue, parseWorkspaceFile } from "@/modules/projects/workspace-file";
 
 const colorPresets = ["#63e6ff", "#b6ff5c", "#a78bfa", "#fbbf24", "#fb7185", "#60a5fa", "#f5f5f5"];
 const textColorPresets = ["#f5f5f5", "#d4d4d4", "#a3a3a3", "#b6ff5c", "#63e6ff", "#a78bfa", "#fbbf24"];
@@ -156,6 +161,8 @@ export function EditorShell() {
   const [documentRevision, setDocumentRevision] = useState(0);
   const [storageReady, setStorageReady] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const canvasRef = useRef<DiagramCanvasHandle>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const shellRef = useRef<HTMLElement>(null);
@@ -188,6 +195,49 @@ export function EditorShell() {
     setWorkspaces((current) => current.map((workspace) => workspace.id === updated.id ? syncActiveScene(updated) : workspace));
     setDocumentRevision((value) => value + 1);
   }, []);
+
+  // Cloud sync. Signed out, none of this runs and the editor stays exactly what
+  // it was: one browser, one IndexedDB, no network.
+  const hydrateRemote = useCallback((raw: unknown) => {
+    try {
+      return normalizeWorkspace(hydrateWorkspaceValue(raw));
+    } catch {
+      // A document this version cannot read is left on the server untouched
+      // rather than dropped or half-imported.
+      return null;
+    }
+  }, []);
+
+  const adoptRemote = useCallback((documents: DiagramDocument[]) => {
+    setWorkspaces((current) => {
+      const known = new Set(current.map((workspace) => workspace.id));
+      const arrivals = documents.filter((document) => !known.has(document.id));
+      return arrivals.length ? [...current, ...arrivals] : current;
+    });
+    setExternalRevision((value) => value + 1);
+  }, []);
+
+  const replaceRemote = useCallback((document: DiagramDocument) => {
+    setWorkspaces((current) => current.map((workspace) => workspace.id === document.id ? document : workspace));
+    setSelectedNodeIds([]);
+    setSelectedEdgeIds([]);
+    setExternalRevision((value) => value + 1);
+  }, []);
+
+  const {
+    session,
+    state: syncState,
+    conflict: syncConflict,
+    signIn,
+    createAccount,
+    signOut,
+    resolveConflict,
+    forget: forgetRemote,
+    syncNow,
+    projectIdFor,
+    versionOf,
+    restoreTo,
+  } = useCloudSync({ workspaces, activeWorkspaceId, ready: storageReady, hydrate: hydrateRemote, onAdopt: adoptRemote, onReplace: replaceRemote });
 
   const createWorkspace = useCallback(() => {
     const workspace = normalizeWorkspace(createBlankDocument(`workspace-${crypto.randomUUID()}`, `Untitled ${workspaces.length + 1}`));
@@ -252,7 +302,9 @@ export function EditorShell() {
     setActiveWorkspaceId(remaining[0].id);
     setSelectedNodeIds([]);
     setSelectedEdgeIds([]);
-  }, [document.id, document.title, document.workspaceTitle, workspaces]);
+    // Without this the next sync would pull the project straight back in.
+    void forgetRemote(document.id);
+  }, [document.id, document.title, document.workspaceTitle, forgetRemote, workspaces]);
 
   const switchScene = useCallback((sceneId: string) => {
     updateWorkspace(activateScene(document, sceneId));
@@ -444,6 +496,31 @@ export function EditorShell() {
     canvasRef.current?.updateNodes(selectedNodeIds, { ...updates, ...roleUpdates });
   }, [selectedNodeIds]);
 
+  // Uploading beats inlining: a 400 KB photo becomes ~533 KB of base64 inside
+  // the document, and the editor autosaves that into the project *and* a row of
+  // version history every few seconds. The document keeps a stable reference
+  // instead. Signed out, or before this workspace has ever synced, there is
+  // nowhere to upload to and base64 remains the honest fallback — the editor
+  // has always worked without an account and still does.
+  const setBackgroundImage = useCallback(async (file: File) => {
+    const projectId = projectIdFor(document.id);
+    if (!projectId) {
+      const reader = new FileReader();
+      reader.onload = () => updateSelected({ backgroundImage: String(reader.result) });
+      reader.readAsDataURL(file);
+      return;
+    }
+    setAiState({ busy: true, message: `Uploading ${file.name}…` });
+    try {
+      const asset = await uploadAsset(projectId, file);
+      rememberAsset(asset);
+      updateSelected({ backgroundImage: assetReference(asset.id) });
+      setAiState({ busy: false, message: `Uploaded ${file.name}` });
+    } catch (error) {
+      setAiState({ busy: false, message: error instanceof Error ? error.message : "Could not upload that image" });
+    }
+  }, [document.id, projectIdFor, updateSelected]);
+
   const updateSelectedEdges = useCallback((updates: { label?: string; semantics?: EdgeSemantics; direction?: EdgeDirection; thickness?: number; animated?: boolean; color?: string; strokeStyle?: EdgeStrokeStyle; effect?: EdgeEffect; speed?: number; routeWaypoints?: DiagramDocument["edges"][number]["routeWaypoints"] | null; routeWaypoint?: DiagramDocument["edges"][number]["routeWaypoint"] | null }) => {
     canvasRef.current?.updateEdges(selectedEdgeIds, updates);
   }, [selectedEdgeIds]);
@@ -496,10 +573,10 @@ export function EditorShell() {
           <button aria-label="Save workspace as" onClick={saveAsWorkspace}>Save as</button>
           <button aria-label="Import workspace JSON" onClick={() => importInputRef.current?.click()}>Import</button>
           <input accept="application/json,.json" aria-label="Workspace JSON file" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void importWorkspace(file); event.currentTarget.value = ""; }} ref={importInputRef} type="file" />
-          <details className="export-menu"><summary>{exporting ? "Rendering…" : "Export"}</summary><div><button disabled={Boolean(exporting)} onClick={() => exportSvg(document)}>SVG animated</button><button disabled={Boolean(exporting)} onClick={() => exportPng(document)}>PNG 2× static</button><button disabled={Boolean(exporting)} onClick={() => exportHtml(document)}>HTML animated</button><button disabled={Boolean(exporting)} onClick={() => void runAnimatedExport("gif")}>{exporting === "gif" ? "Rendering GIF…" : "GIF animated"}</button><button disabled={Boolean(exporting)} onClick={() => void runAnimatedExport("video")}>{exporting === "video" ? "Recording video…" : "Video WebM"}</button><button disabled={Boolean(exporting)} onClick={() => exportWorkspaceJson(document)}>Workspace JSON</button></div></details>
+          <details className="export-menu"><summary>{exporting ? "Rendering…" : "Export"}</summary><div><button disabled={Boolean(exporting)} onClick={() => void exportSvg(document)}>SVG animated</button><button disabled={Boolean(exporting)} onClick={() => void exportPng(document)}>PNG 2× static</button><button disabled={Boolean(exporting)} onClick={() => void exportHtml(document)}>HTML animated</button><button disabled={Boolean(exporting)} onClick={() => void runAnimatedExport("gif")}>{exporting === "gif" ? "Rendering GIF…" : "GIF animated"}</button><button disabled={Boolean(exporting)} onClick={() => void runAnimatedExport("video")}>{exporting === "video" ? "Recording video…" : "Video WebM"}</button><button disabled={Boolean(exporting)} onClick={() => void exportWorkspaceJson(document)}>Workspace JSON</button></div></details>
           <button aria-label="Start presentation" className="present" disabled={document.nodes.length === 0} onClick={startPresenting} title="Present scenes (Esc to exit)">▶ Present</button>
           <button aria-label="Open configuration" onClick={() => setConfigOpen(true)}>Config</button>
-          <button className="share" disabled title="Cloud sharing requires a project backend">Share</button>
+          <SyncBadge onOpen={() => setAccountOpen(true)} state={syncState} />
         </div>
       </header>
 
@@ -512,7 +589,7 @@ export function EditorShell() {
           <div className="workspace-manager">
             <label>ACTIVE WORKSPACE</label>
             <input aria-label="Workspace name" value={document.workspaceTitle ?? document.title} onChange={(event) => updateWorkspace({ ...document, workspaceTitle: event.target.value })} />
-            <div><button onClick={duplicateWorkspace}>Duplicate</button><button className="danger" disabled={workspaces.length === 1} onClick={deleteWorkspace}>Delete</button></div>
+            <div><button onClick={duplicateWorkspace}>Duplicate</button><button onClick={() => setHistoryOpen(true)}>History</button><button className="danger" disabled={workspaces.length === 1} onClick={deleteWorkspace}>Delete</button></div>
           </div>
           <details className="sample-library" open>
             <summary><span>CHART EXAMPLES</span><b>{diagramSamples.length}</b></summary>
@@ -645,9 +722,9 @@ export function EditorShell() {
               <span>Effect speed · {(selectedNodes[0]?.speed ?? 2.1).toFixed(1)} s</span>
               <input aria-label="Component effect speed" className="line-thickness" disabled={selectedNodes.every((node) => node.effect === "none")} type="range" min="0.4" max="6" step="0.1" value={selectedNodes[0]?.speed ?? 2.1} onChange={(event) => updateSelected({ speed: Number(event.target.value) })} />
               <span>Background image</span>
-              <input aria-label="Component background image URL" placeholder="https://…" value={selectedNodes.length === 1 ? selectedNodes[0].backgroundImage ?? "" : ""} onChange={(event) => updateSelected({ backgroundImage: event.target.value })} />
+              <input aria-label="Component background image URL" disabled={selectedNodes.length === 1 && Boolean(assetIdOf(selectedNodes[0].backgroundImage))} placeholder="https://…" value={selectedNodes.length !== 1 ? "" : assetIdOf(selectedNodes[0].backgroundImage) ? "Uploaded image" : selectedNodes[0].backgroundImage ?? ""} onChange={(event) => updateSelected({ backgroundImage: event.target.value })} />
               <div className="background-editor">
-                <label>Upload<input accept="image/*" aria-label="Upload component background image" type="file" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => updateSelected({ backgroundImage: String(reader.result) }); reader.readAsDataURL(file); event.currentTarget.value = ""; }} /></label>
+                <label>Upload<input accept="image/*" aria-label="Upload component background image" type="file" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void setBackgroundImage(file); }} /></label>
                 <select aria-label="Component background fit" value={selectedNodes[0]?.backgroundFit ?? "cover"} onChange={(event) => updateSelected({ backgroundFit: event.target.value as "cover" | "contain" })}><option value="cover">Cover</option><option value="contain">Contain</option></select>
                 <button disabled={selectedNodes.every((node) => !node.backgroundImage)} onClick={() => updateSelected({ backgroundImage: "" })}>Remove</button>
               </div>
@@ -667,7 +744,7 @@ export function EditorShell() {
           ) : <section className="selection-empty"><label>SELECTION</label><p>Select components or connections to edit their visual and technical properties.</p></section>}
           <ItemCommentThread workspaceId={document.id} nodeIds={selectedNodeIds} edgeIds={selectedEdgeIds} />
           <section><label>FORMAT</label><div className="segmented segmented--formats">{(["full", "16:9", "1:1", "4:5", "9:16"] as DiagramFormat[]).map((format) => <button aria-label={`Set format ${format}`} className={(document.format ?? "16:9") === format ? "active" : ""} key={format} onClick={() => setDocumentFormat(format)}>{format === "full" ? "Full" : format}</button>)}</div></section>
-          <section><label>DIAGRAM</label><dl><div><dt>Mode</dt><dd>{document.mode}</dd></div><div><dt>Grid</dt><dd>8 px</dd></div><div><dt>Routing</dt><dd>Orthogonal</dd></div><div><dt>Storage</dt><dd className="enabled">Local</dd></div></dl></section>
+          <section><label>DIAGRAM</label><dl><div><dt>Mode</dt><dd>{document.mode}</dd></div><div><dt>Grid</dt><dd>8 px</dd></div><div><dt>Routing</dt><dd>Orthogonal</dd></div><div><dt>Storage</dt><dd className="enabled">{session ? "Local + cloud" : "Local"}</dd></div></dl></section>
           <section className="quality"><label>QUALITY CHECKS</label><p><i /> Named ports</p><p><i /> Snap-to-grid</p><p><i /> Typed AI plan</p></section>
         </aside>
       </section>
@@ -682,6 +759,24 @@ export function EditorShell() {
         </div>
       ) : null}
       <AiConnectionSettings open={configOpen} onClose={() => setConfigOpen(false)} />
+      <AccountDialog
+        onClose={() => setAccountOpen(false)}
+        onCreateAccount={createAccount}
+        onSignIn={signIn}
+        onSignOut={signOut}
+        onSyncNow={syncNow}
+        open={accountOpen}
+        session={session}
+        state={syncState}
+      />
+      <ConflictDialog conflict={syncConflict} onResolve={resolveConflict} />
+      <HistoryDialog
+        currentVersion={versionOf(document.id)}
+        onClose={() => setHistoryOpen(false)}
+        onRestore={(version) => restoreTo(document.id, version)}
+        open={historyOpen}
+        projectId={projectIdFor(document.id)}
+      />
     </main>
     </AiAssistantProvider>
   );
