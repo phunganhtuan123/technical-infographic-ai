@@ -22,6 +22,7 @@ import {
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
+  ViewportPortal,
   reconnectEdge,
   useReactFlow,
   useStore,
@@ -37,6 +38,7 @@ import {
   type PrimitiveDefinition,
 } from "@/modules/diagram/factory";
 import type { DiagramDocument, DiagramEdge, DiagramNode, EdgeDirection, EdgeSemantics } from "@/modules/diagram/schema";
+import { exportBounds } from "@/modules/diagram/bounds";
 import { layoutDocument } from "@/modules/layout/layout-document";
 import { EdgeCaptionEditContext, EdgeLabelMoveContext, EdgeRouteMoveContext, SemanticEdge, edgeCaptionEditEvent, type SemanticFlowEdge } from "./semantic-edge";
 import { ContainerLabelMoveContext, NodeInlineEditContext, SemanticNode, type SemanticFlowNode } from "./semantic-node";
@@ -51,6 +53,12 @@ export type DiagramCanvasHandle = {
   deleteSelection: (nodeIds: string[], edgeIds: string[]) => void;
   groupSelection: (nodeIds: string[]) => void;
   ungroupSelection: (nodeIds: string[]) => void;
+  // Reachable from the menu bar as well as from the canvas toolbar.
+  undo: () => void;
+  redo: () => void;
+  canUndo: () => boolean;
+  canRedo: () => boolean;
+  fitToView: () => void;
 };
 
 type DiagramCanvasProps = {
@@ -594,7 +602,19 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
       return () => window.removeEventListener("keydown", onKeyDown);
     }, [copySelection, pasteSelection, restore]);
 
-    useImperativeHandle(ref, () => ({ arrange, deleteSelection, groupSelection, insertPrimitive, ungroupSelection, updateEdges, updateNodes }), [arrange, deleteSelection, groupSelection, insertPrimitive, ungroupSelection, updateEdges, updateNodes]);
+    const fitToView = useCallback(() => {
+      viewportPinnedRef.current = false;
+      fitView({ padding: 0.14, duration: 420 });
+    }, [fitView]);
+
+    useImperativeHandle(ref, () => ({
+      arrange, deleteSelection, groupSelection, insertPrimitive, ungroupSelection, updateEdges, updateNodes,
+      undo: () => restore("undo"),
+      redo: () => restore("redo"),
+      canUndo: () => historyRef.current.past.length > 0,
+      canRedo: () => historyRef.current.future.length > 0,
+      fitToView,
+    }), [arrange, deleteSelection, fitToView, groupSelection, insertPrimitive, restore, ungroupSelection, updateEdges, updateNodes]);
 
     const handleNodesChange = useCallback((changes: NodeChange<SemanticFlowNode>[]) => {
       const dimensions = new Map<string, { width: number; height: number }>();
@@ -678,6 +698,8 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
 
     const canUndo = historyRef.current.past.length > 0;
     const canRedo = historyRef.current.future.length > 0;
+    // Recomputed only when the drawing actually moves, not on every render.
+    const frame = useMemo(() => exportBounds(document), [document]);
     void historyRevision;
 
     return (
@@ -820,6 +842,27 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
         >
           <Background id="minor-grid" color="#171717" gap={8} size={0.45} variant={BackgroundVariant.Lines} />
           <Background id="major-grid" color="#292929" gap={32} size={0.8} variant={BackgroundVariant.Lines} />
+          {/* The export frame, in diagram coordinates rather than screen ones, so
+              it pans and zooms with the drawing. This is the exact rectangle the
+              exporter will cover — nothing outside it is cropped, because the
+              frame grows to hold every component; it is there to show the shape
+              the output will have. */}
+          {nodes.length > 0 ? (
+            <ViewportPortal>
+              <div
+                aria-hidden="true"
+                className="export-frame"
+                style={{
+                  position: "absolute",
+                  transform: `translate(${frame.minX}px, ${frame.minY}px)`,
+                  width: frame.width,
+                  height: frame.height,
+                }}
+              >
+                <span>{(document.format ?? "16:9").toUpperCase()} · EXPORT</span>
+              </div>
+            </ViewportPortal>
+          ) : null}
           <MiniMap
             ariaLabel="Diagram minimap"
             maskColor="rgba(5,5,5,.72)"

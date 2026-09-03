@@ -25,27 +25,104 @@ const phaseLabels: Record<SyncState["phase"], string> = {
   error: "Error",
 };
 
-export function SyncBadge({ state, onOpen }: { state: SyncState; onOpen: () => void }) {
-  const pending = state.pending > 0 && (state.phase === "synced" || state.phase === "offline");
+/** Two letters from a name or an email, which is what an avatar is when there is no picture. */
+function initials(session: Session) {
+  const source = session.user.displayName?.trim() || session.user.email || "?";
+  const words = source.split(/[\s.@_-]+/).filter(Boolean);
+  return ((words[0]?.[0] ?? "?") + (words[1]?.[0] ?? "")).toUpperCase();
+}
+
+/**
+ * The account control.
+ *
+ * Signed out it is a labelled button, because signing in is an invitation and
+ * an invitation needs a word. Signed in it is an avatar, and the sync state
+ * rides on it as a ring: a settled editor shows one quiet circle and spends no
+ * words at all. Only an unsettled one — unsaved work, offline, a conflict —
+ * puts a word beside it, which is precisely when you want to be told.
+ */
+export function AccountControl({
+  session,
+  state,
+  onOpen,
+}: {
+  session: Session | null;
+  state: SyncState;
+  onOpen: () => void;
+}) {
+  // data-sync is the one stable hook for tests and for anything that needs to
+  // know the state without parsing a sentence meant for a person.
+  if (!session) {
+    return (
+      <button className="signin-button" data-sync="signed-out" onClick={onOpen} type="button">
+        Sign in
+      </button>
+    );
+  }
+
+  const unsettled =
+    state.phase === "offline" || state.phase === "conflict" || state.phase === "error"
+      ? phaseLabels[state.phase]
+      : state.pending > 0
+        ? `${state.pending} unsaved`
+        : state.phase === "saving" || state.phase === "pulling"
+          ? phaseLabels[state.phase]
+          : null;
+
+  const tone = state.phase === "conflict" || state.phase === "error" ? "bad" : unsettled ? "warn" : "good";
+  const who = session.user.email ?? session.user.displayName;
+
+  return (
+    <span className="account-control" data-pending={state.pending} data-sync={state.phase}>
+      {unsettled ? <span className={`account-state tone-${tone}`}>{unsettled}</span> : null}
+      <button
+        aria-label={`Account — ${who} — ${state.message}`}
+        className={`avatar tone-${tone}`}
+        onClick={onOpen}
+        title={`${who} · ${state.message}`}
+        type="button"
+      >
+        {initials(session)}
+        <i />
+      </button>
+    </span>
+  );
+}
+
+/**
+ * The AI gateway chip.
+ *
+ * A button labelled "Config" could not tell you whether anything was connected.
+ * This answers that question in the same shape as the account control, and it
+ * sits next to the prompt field because that is where you notice it matters.
+ */
+export function AiGatewayChip({
+  connected,
+  provider,
+  model,
+  onOpen,
+}: {
+  connected: boolean;
+  provider?: string;
+  model?: string;
+  onOpen: () => void;
+}) {
   return (
     <button
-      aria-label={`Account and sync — ${state.message}`}
-      className={`sync-badge phase-${state.phase}${pending ? " is-pending" : ""}`}
+      className={`ai-chip${connected ? " is-connected" : ""}`}
       onClick={onOpen}
-      title={state.message}
+      title={connected ? `${provider ?? "Connected"}${model ? ` · ${model}` : ""} · click to change` : "No model connected — click to set one up"}
       type="button"
     >
       <i />
-      <span>{pending ? `${state.pending} unsaved` : phaseLabels[state.phase]}</span>
+      <span>{connected ? provider ?? "Connected" : "Connect AI"}</span>
+      {connected && model ? <em>{model}</em> : null}
     </button>
   );
 }
 
 type AccountDialogProps = {
   open: boolean;
-  // Which half the top bar asked for. Reapplied on each open so "Sign up"
-  // lands on the register form even after a previous visit left sign-in showing.
-  initialMode?: "sign-in" | "register";
   session: Session | null;
   state: SyncState;
   onClose: () => void;
@@ -57,7 +134,6 @@ type AccountDialogProps = {
 
 export function AccountDialog({
   open,
-  initialMode = "sign-in",
   session,
   state,
   onClose,
@@ -66,7 +142,7 @@ export function AccountDialog({
   onSignOut,
   onSyncNow,
 }: AccountDialogProps) {
-  const [mode, setMode] = useState<"sign-in" | "register">(initialMode);
+  const [mode, setMode] = useState<"sign-in" | "register">("sign-in");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -75,14 +151,13 @@ export function AccountDialog({
 
   useEffect(() => {
     if (!open) return;
-    setMode(initialMode);
     setError(null);
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [initialMode, onClose, open]);
+  }, [onClose, open]);
 
   // A successful sign-in changes the session underneath this dialog; clearing
   // the password field means it is not sitting in the DOM afterwards.
@@ -202,26 +277,6 @@ export function AccountDialog({
           </>
         ) : (
           <>
-            <div aria-label="Sign in or create an account" className="account-tabs" role="tablist">
-              <button
-                aria-selected={mode === "sign-in"}
-                className={mode === "sign-in" ? "active" : ""}
-                onClick={() => { setMode("sign-in"); setError(null); }}
-                role="tab"
-                type="button"
-              >
-                Sign in
-              </button>
-              <button
-                aria-selected={mode === "register"}
-                className={mode === "register" ? "active" : ""}
-                onClick={() => { setMode("register"); setError(null); }}
-                role="tab"
-                type="button"
-              >
-                Sign up
-              </button>
-            </div>
             <form className="account-form" onSubmit={submit}>
               {mode === "register" ? (
                 <label>
@@ -263,10 +318,19 @@ export function AccountDialog({
               </button>
             </form>
             <p className="account-note">
-              {mode === "register"
-                ? "An account copies your workspaces to the server so they open on another machine. Everything already in this browser is kept and uploaded on the first sync."
-                : "Signing in copies your workspaces to the server so they open on another machine. Without an account the editor is unchanged — everything stays in this browser."}
+              Signing in copies your workspaces to the server so they open on another machine. Without an account the
+              editor is unchanged — everything stays in this browser.
             </p>
+            <button
+              className="account-switch"
+              onClick={() => {
+                setMode(mode === "register" ? "sign-in" : "register");
+                setError(null);
+              }}
+              type="button"
+            >
+              {mode === "register" ? "I already have an account" : "Create an account instead"}
+            </button>
           </>
         )}
       </section>

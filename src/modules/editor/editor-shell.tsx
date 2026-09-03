@@ -14,7 +14,8 @@ import type { DiagramDocument, DiagramFormat, DiagramScene, EdgeDirection, EdgeE
 import { exportGif, exportHtml, exportPng, exportSvg, exportVideo, exportWorkspaceJson } from "@/modules/export/export-document";
 import { architecturePlan } from "@/modules/fixtures/architecture-plan";
 import { diagramSamples } from "@/modules/fixtures/diagram-samples";
-import { AccountDialog, ConflictDialog, SyncBadge } from "@/modules/projects/account-panel";
+import { AccountControl, AccountDialog, AiGatewayChip, ConflictDialog } from "@/modules/projects/account-panel";
+import { MenuBar, type Menu, type MenuItem } from "@/modules/editor/menu-bar";
 import { uploadAsset } from "@/modules/projects/api-client";
 import { assetIdOf, assetReference, rememberAsset } from "@/modules/projects/asset-urls";
 import { HistoryDialog } from "@/modules/projects/history-panel";
@@ -42,16 +43,6 @@ function numberFieldValue(raw: string, fallback: number, lower: number, upper: n
 
 // Narrowest the canvas column is allowed to become while a panel is dragged.
 const minimumCanvasWidth = 560;
-// The left panel shows one of these at a time. Four blocks stacked vertically
-// pushed the component list below the fold on a laptop, so the panel is an
-// accordion: the section you are working in is open, the rest are one row each.
-type LibrarySection = "workspaces" | "examples" | "components" | "providers";
-const librarySections: Array<{ id: LibrarySection; label: string }> = [
-  { id: "workspaces", label: "WORKSPACES" },
-  { id: "examples", label: "CHART EXAMPLES" },
-  { id: "components", label: "COMPONENTS" },
-  { id: "providers", label: "PROVIDERS & STACKS" },
-];
 const flowRoles = new Set<NodeRole>(["start", "process", "decision", "input-output", "end", "document", "subprocess", "manual-input", "preparation", "delay", "connector", "off-page", "merge", "stored-data"]);
 const structureRoles = new Set<NodeRole>(["zone", "group"]);
 const annotationRoles = new Set<NodeRole>(["text", "note"]);
@@ -148,6 +139,27 @@ function IconPicker({ matches, onSelect }: { matches: (technology?: string) => b
   );
 }
 
+/**
+ * The AI gateway's state, next to the prompt field.
+ *
+ * It replaced a button labelled "Config", which could not tell you whether
+ * anything was connected — and a model running on your own machine is the
+ * rarest thing this editor does, so it should not be something you go hunting
+ * for. Same shape as the account control, answering the same kind of question.
+ */
+function AiStatusChip({ onOpen }: { onOpen: () => void }) {
+  const ai = useAiAssistant();
+  const provider = ai.providers.find((candidate) => candidate.id === ai.providerId);
+  return (
+    <AiGatewayChip
+      connected={ai.connected}
+      model={ai.model}
+      onOpen={onOpen}
+      provider={provider?.label ?? (ai.gatewayOrigin ? "Client gateway" : undefined)}
+    />
+  );
+}
+
 export function EditorShell() {
   const initialDocument = useMemo(() => normalizeWorkspace(compilePlan(architecturePlan)), []);
   const [intent, setIntent] = useState<"build" | "publish">("build");
@@ -157,22 +169,23 @@ export function EditorShell() {
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
   const [selectedEdgeIds, setSelectedEdgeIds] = useState<string[]>([]);
   const [libraryView, setLibraryView] = useState<"tree" | "grid">("tree");
-  const [libraryWidth, setLibraryWidth] = useState(280);
+  const [libraryWidth, setLibraryWidth] = useState(240);
   const [libraryCollapsed, setLibraryCollapsed] = useState(false);
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
   const [presenting, setPresenting] = useState(false);
   const [sceneTransition, setSceneTransition] = useState(false);
-  const [librarySection, setLibrarySection] = useState<LibrarySection>("workspaces");
+  const [componentListCollapsed, setComponentListCollapsed] = useState(false);
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set(["Technology"]));
-  const [inspectorWidth, setInspectorWidth] = useState(280);
+  const [inspectorWidth, setInspectorWidth] = useState(240);
   const [aiState, setAiState] = useState<{ busy: boolean; message: string; source?: string }>({ busy: false, message: "Ready" });
   const [exporting, setExporting] = useState<"gif" | "video" | null>(null);
   const [externalRevision, setExternalRevision] = useState(0);
   const [documentRevision, setDocumentRevision] = useState(0);
   const [storageReady, setStorageReady] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
-  const [accountOpen, setAccountOpen] = useState<"sign-in" | "register" | null>(null);
+  const [accountOpen, setAccountOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [inspectorTab, setInspectorTab] = useState<"content" | "style" | "layout">("content");
   const canvasRef = useRef<DiagramCanvasHandle>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const shellRef = useRef<HTMLElement>(null);
@@ -555,12 +568,6 @@ export function EditorShell() {
     }
   }, [document, exporting]);
 
-  const renderPrimitive = (primitive: (typeof primitiveDefinitions)[number]) => (
-    <button draggable key={`${primitive.role}-${primitive.technology ?? primitive.label}`} onClick={() => canvasRef.current?.insertPrimitive(primitive)} onDragStart={(event) => { event.dataTransfer.setData(primitiveDragType, JSON.stringify(primitive)); event.dataTransfer.effectAllowed = "copy"; }} title={`Add ${primitive.label}`}>
-      {primitive.technology ? <TechnologyIcon technology={primitive.technology} /> : <ComponentIcon role={primitive.role} />}<span className="primitive-copy"><span className="primitive-name">{primitive.label}</span><small>{primitive.detail}</small></span><span className="primitive-add">＋</span>
-    </button>
-  );
-
   const primitiveGroups = [
     ["Technology", filteredPrimitives.filter((primitive) => primitive.technology)],
     ["Structure", filteredPrimitives.filter((primitive) => !primitive.technology && structureRoles.has(primitive.role))],
@@ -571,118 +578,224 @@ export function EditorShell() {
     ["Async", filteredPrimitives.filter((primitive) => !primitive.technology && primitive.lane === "async" && !flowRoles.has(primitive.role) && !structureRoles.has(primitive.role))],
     ["Data", filteredPrimitives.filter((primitive) => !primitive.technology && primitive.lane === "data" && !flowRoles.has(primitive.role) && !structureRoles.has(primitive.role))],
   ] as const;
-  // The header count is what the library holds, not what the current search
-  // leaves standing, so it does not flicker while a query is being typed.
-  const primitiveCount = primitiveDefinitions.length;
 
-  // Leaving the component section drops the query with it: a filter that is
-  // still narrowing the list from behind a closed section is a trap.
-  const showLibrarySection = (next: LibrarySection) => {
-    setLibrarySection(next);
-    if (next !== "components") setSearch("");
-  };
+  // Every command the editor has, grouped where somebody would look for it.
+  // A command with no `run` renders as "soon" — listed on purpose, so the menu
+  // does not have to be reorganised when it lands.
+  const command = (label: string, run?: () => void, extra: Partial<MenuItem & { kind: "command" }> = {}) =>
+    ({ kind: "command" as const, label, run, ...extra });
+  const separator = { kind: "separator" as const };
+  const heading = (label: string) => ({ kind: "heading" as const, label });
+  const scenes_ = document.scenes ?? [];
+
+  const menus: Menu[] = [
+    { label: "File", items: [
+      command("New workspace", createWorkspace),
+      command("Duplicate", duplicateWorkspace),
+      command("Save as…", saveAsWorkspace),
+      separator,
+      command("Import workspace JSON…", () => importInputRef.current?.click()),
+      command("Import Mermaid…"),
+      command("Import PlantUML…"),
+      separator,
+      command("Version history…", () => setHistoryOpen(true)),
+      command("Delete workspace", deleteWorkspace, { disabled: workspaces.length === 1 }),
+    ] },
+    { label: "Edit", items: [
+      command("Undo", () => canvasRef.current?.undo(), { hint: "⌘Z" }),
+      command("Redo", () => canvasRef.current?.redo(), { hint: "⇧⌘Z" }),
+      separator,
+      command("Delete selection", () => canvasRef.current?.deleteSelection(selectedNodeIds, selectedEdgeIds), {
+        hint: "⌫", disabled: selectedNodeIds.length === 0 && selectedEdgeIds.length === 0,
+      }),
+      separator,
+      command("Group", () => canvasRef.current?.groupSelection(selectedNodeIds), { disabled: selectedNodeIds.length < 2 }),
+      command("Ungroup", () => canvasRef.current?.ungroupSelection(selectedNodeIds), { disabled: selectedNodeIds.length === 0 }),
+      command("Reset auto-route", () => updateSelectedEdges({ routeWaypoints: null, routeWaypoint: null }), {
+        disabled: selectedEdgeIds.length === 0,
+      }),
+    ] },
+    { label: "View", items: [
+      command("Build", () => setIntent("build"), { checked: intent === "build" }),
+      command("Publish", () => setIntent("publish"), { checked: intent === "publish" }),
+      separator,
+      command("Fit to view", () => canvasRef.current?.fitToView()),
+      separator,
+      command(libraryCollapsed ? "Show left panel" : "Hide left panel", () => animateLayout(() => setLibraryCollapsed((value) => !value))),
+      command(inspectorCollapsed ? "Show right panel" : "Hide right panel", () => animateLayout(() => setInspectorCollapsed((value) => !value))),
+      command(componentListCollapsed ? "Show component list" : "Hide component list", () => setComponentListCollapsed((value) => !value)),
+    ] },
+    { label: "Insert", items: [
+      heading("Components"),
+      ...primitiveGroups.slice(0, 4).map(([group, primitives]) =>
+        command(`${group}…`, primitives.length ? () => { setSearch(""); setComponentListCollapsed(false); setCollapsedCategories((current) => { const next = new Set(current); next.delete(group); return next; }); } : undefined,
+          { hint: String(primitives.length) })),
+      separator,
+      command("Background image…", () => setInspectorCollapsed(false), { disabled: selectedNodeIds.length === 0 }),
+      command("Image library…"),
+    ] },
+    { label: "AI", items: [
+      heading("Gateway"),
+      command("Connect a gateway…", () => setConfigOpen(true)),
+      command("Settings…", () => setConfigOpen(true)),
+      separator,
+      heading("Generate"),
+      command("Generate a diagram…", () => setInspectorCollapsed(false), { hint: "⌘K" }),
+      command("Explain this diagram"),
+      separator,
+      command("Conversation panel", () => setConfigOpen(true)),
+    ] },
+    { label: "Arrange", items: [
+      command("Auto-layout", () => void canvasRef.current?.arrange(), { disabled: document.nodes.length === 0 }),
+      separator,
+      command("Bring to front", () => updateSelected({ zIndex: Math.min(100, (selectedNodes[0]?.zIndex ?? 1) + 1) }), { disabled: selectedNodeIds.length === 0 }),
+      command("Send to back", () => updateSelected({ zIndex: Math.max(-20, (selectedNodes[0]?.zIndex ?? 1) - 1) }), { disabled: selectedNodeIds.length === 0 }),
+      separator,
+      heading("Canvas format"),
+      ...(["16:9", "1:1", "4:5", "9:16", "full"] as DiagramFormat[]).map((format) =>
+        command(format === "full" ? "Full" : format, () => setDocumentFormat(format), { checked: (document.format ?? "16:9") === format })),
+    ] },
+    { label: "Export", items: [
+      heading("Keeps the animation"),
+      command("SVG animated", () => void exportSvg(document), { disabled: Boolean(exporting) }),
+      command("HTML animated", () => void exportHtml(document), { disabled: Boolean(exporting) }),
+      command(exporting === "gif" ? "Rendering GIF…" : "GIF animated", () => void runAnimatedExport("gif"), { disabled: Boolean(exporting) }),
+      command(exporting === "video" ? "Recording video…" : "Video WebM", () => void runAnimatedExport("video"), { disabled: Boolean(exporting) }),
+      separator,
+      heading("Still"),
+      command("PNG 2×", () => void exportPng(document), { disabled: Boolean(exporting) }),
+      command("PDF"),
+      separator,
+      command("Workspace JSON", () => void exportWorkspaceJson(document)),
+    ] },
+    { label: "Help", items: [
+      command("Account…", () => setAccountOpen(true)),
+      separator,
+      command("Keyboard shortcuts"),
+      command("Documentation"),
+    ] },
+  ];
+
+  // The active workspace's own ⋯ — what used to be a name field and three
+  // buttons taking permanent space in the panel.
+  const workspaceMenu: Menu[] = [{ label: "⋯", items: [
+    command("Rename…", () => {
+      const name = window.prompt("Rename workspace", document.workspaceTitle ?? document.title)?.trim();
+      if (name) updateWorkspace({ ...document, workspaceTitle: name });
+    }),
+    command("Duplicate", duplicateWorkspace),
+    command("Save as…", saveAsWorkspace),
+    separator,
+    command("Version history…", () => setHistoryOpen(true)),
+    separator,
+    command("Delete", deleteWorkspace, { disabled: workspaces.length === 1 }),
+  ] }];
+
+  // The scene row's own ⋯ — the commands that used to be three buttons.
+  const sceneMenu: Menu[] = [{ label: "⋯", items: [
+    command("Add scene", createScene),
+    command("Duplicate scene", duplicateScene),
+    command("Rename scene…", () => {
+      const active = scenes_.find((scene) => scene.id === document.activeSceneId);
+      const name = window.prompt("Rename scene", active?.name ?? "")?.trim();
+      if (name) renameScene(name);
+    }),
+    separator,
+    command("Delete scene", deleteScene, { disabled: scenes_.length === 1 }),
+  ] }];
+
+  const renderPrimitive = (primitive: (typeof primitiveDefinitions)[number]) => (
+    <button draggable key={`${primitive.role}-${primitive.technology ?? primitive.label}`} onClick={() => canvasRef.current?.insertPrimitive(primitive)} onDragStart={(event) => { event.dataTransfer.setData(primitiveDragType, JSON.stringify(primitive)); event.dataTransfer.effectAllowed = "copy"; }} title={`Add ${primitive.label}`}>
+      {primitive.technology ? <TechnologyIcon technology={primitive.technology} /> : <ComponentIcon role={primitive.role} />}<span className="primitive-copy"><span className="primitive-name">{primitive.label}</span><small>{primitive.detail}</small></span><span className="primitive-add">＋</span>
+    </button>
+  );
+
 
   return (
     <AiAssistantProvider document={document} revision={documentRevision} selectedNodeIds={selectedNodeIds} selectedEdgeIds={selectedEdgeIds} onAccept={acceptAiProposal}>
-    <main className={`app-shell${presenting ? " is-presenting" : ""}`} ref={shellRef} style={{ "--library-width": libraryCollapsed ? "52px" : `${libraryWidth}px`, "--inspector-width": inspectorCollapsed ? "52px" : `${inspectorWidth}px` } as React.CSSProperties}>
+    <main className={`app-shell${presenting ? " is-presenting" : ""}`} ref={shellRef} style={{ "--library-width": libraryCollapsed ? "44px" : `${libraryWidth}px`, "--inspector-width": inspectorCollapsed ? "44px" : `${inspectorWidth}px` } as React.CSSProperties}>
       <header className="topbar">
         <div className="brand"><i /> Technical Infographic <span>alpha</span></div>
-        <div className="intent-switch" aria-label="Workspace intent"><button className={intent === "build" ? "active" : ""} onClick={() => setIntent("build")}>Build</button><button className={intent === "publish" ? "active" : ""} onClick={() => setIntent("publish")}>Publish</button></div>
+        <MenuBar menus={menus} />
+        <input accept="application/json,.json" aria-label="Workspace JSON file" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void importWorkspace(file); event.currentTarget.value = ""; }} ref={importInputRef} type="file" />
         <div className="top-actions">
-          <button className="new-workspace" onClick={createWorkspace}>＋ New</button>
-          <button aria-label="Save workspace as" onClick={saveAsWorkspace}>Save as</button>
-          <button aria-label="Import workspace JSON" onClick={() => importInputRef.current?.click()}>Import</button>
-          <input accept="application/json,.json" aria-label="Workspace JSON file" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void importWorkspace(file); event.currentTarget.value = ""; }} ref={importInputRef} type="file" />
-          <details className="export-menu"><summary>{exporting ? "Rendering…" : "Export"}</summary><div><button disabled={Boolean(exporting)} onClick={() => void exportSvg(document)}>SVG animated</button><button disabled={Boolean(exporting)} onClick={() => void exportPng(document)}>PNG 2× static</button><button disabled={Boolean(exporting)} onClick={() => void exportHtml(document)}>HTML animated</button><button disabled={Boolean(exporting)} onClick={() => void runAnimatedExport("gif")}>{exporting === "gif" ? "Rendering GIF…" : "GIF animated"}</button><button disabled={Boolean(exporting)} onClick={() => void runAnimatedExport("video")}>{exporting === "video" ? "Recording video…" : "Video WebM"}</button><button disabled={Boolean(exporting)} onClick={() => void exportWorkspaceJson(document)}>Workspace JSON</button></div></details>
+          <div className="intent-switch" aria-label="Workspace intent"><button className={intent === "build" ? "active" : ""} onClick={() => setIntent("build")}>Build</button><button className={intent === "publish" ? "active" : ""} onClick={() => setIntent("publish")}>Publish</button></div>
           <button aria-label="Start presentation" className="present" disabled={document.nodes.length === 0} onClick={startPresenting} title="Present scenes (Esc to exit)">▶ Present</button>
-          <button aria-label="Open configuration" onClick={() => setConfigOpen(true)}>Config</button>
-          {session ? <SyncBadge onOpen={() => setAccountOpen("sign-in")} state={syncState} /> : null}
-          {session ? (
-            <button aria-label="Account" className="account-chip" onClick={() => setAccountOpen("sign-in")} title={session.user.email ?? session.user.displayName}>
-              <i aria-hidden="true">{(session.user.displayName || session.user.email || "?").slice(0, 1).toUpperCase()}</i>
-              <span>{session.user.displayName || session.user.email}</span>
-            </button>
-          ) : (
-            // Signed out, an account is the one thing the top bar is asking for,
-            // so it is a pair of real buttons rather than another grey one.
-            <div className="auth-actions">
-              <button className="auth-sign-in" onClick={() => setAccountOpen("sign-in")}>Sign in</button>
-              <button className="auth-sign-up" onClick={() => setAccountOpen("register")}>Sign up</button>
-            </div>
-          )}
+          <AccountControl onOpen={() => setAccountOpen(true)} session={session} state={syncState} />
         </div>
       </header>
 
+      {/* One row where a 132 px header used to be. The title is a breadcrumb
+          rather than a heading — it is not editable here and never was — and the
+          composer keeps its full panel, it just stops reserving a band across
+          the top while you drag boxes. */}
+      <div className="context-row">
+        <span className="context-crumb">
+          <small>{document.mode.toUpperCase()}</small>
+          <strong title={document.workspaceTitle ?? document.title}>{document.workspaceTitle ?? document.title}</strong>
+        </span>
+        <p className="context-purpose" title={document.purpose}>{document.purpose}</p>
+        <div className="context-ai">
+          <GlobalAiComposer hasNodes={document.nodes.length > 0} currentFormat={document.format ?? "16:9"} />
+          <AiStatusChip onOpen={() => setConfigOpen(true)} />
+        </div>
+      </div>
+
       <section className="workspace">
         <aside className={`library-panel${libraryCollapsed ? " is-collapsed" : ""}`}>
-          <button aria-label={libraryCollapsed ? "Expand left panel" : "Collapse left panel"} className="library-collapse" onClick={() => animateLayout(() => setLibraryCollapsed((value) => !value))}>{libraryCollapsed ? "\u203a" : "\u2039"}</button>
+          <button aria-label={libraryCollapsed ? "Expand left panel" : "Collapse left panel"} className="library-collapse" onClick={() => animateLayout(() => setLibraryCollapsed((value) => !value))}>{libraryCollapsed ? "›" : "‹"}</button>
           <div aria-hidden="true" className="library-resizer" onPointerDown={(event) => startResize(event, "left")} />
-          <div className="library-accordion">
-            {librarySections.map((section) => {
-              const open = librarySection === section.id;
-              const count = section.id === "workspaces" ? workspaces.length
-                : section.id === "examples" ? diagramSamples.length
-                : section.id === "components" ? primitiveCount
-                : technologyOptions.length;
-              return (
-                <section className={`library-section${open ? " is-open" : ""}`} key={section.id}>
-                  <div className="library-section-head">
-                    <button aria-expanded={open} className="library-section-toggle" onClick={() => showLibrarySection(section.id)}>
-                      <i aria-hidden="true">{open ? "\u25be" : "\u25b8"}</i><span>{section.label}</span><b>{count}</b>
-                    </button>
-                    {section.id === "workspaces" ? <button aria-label="Create workspace" className="panel-add" onClick={createWorkspace}>＋</button> : null}
-                    {section.id === "components" && open ? (
-                      <div className="library-view-switch">
-                        <button aria-label="Tree component view" className={libraryView === "tree" ? "active" : ""} onClick={() => setLibraryView("tree")}>Tree</button>
-                        <button aria-label="Grid component view" className={libraryView === "grid" ? "active" : ""} onClick={() => setLibraryView("grid")}>Grid</button>
-                      </div>
-                    ) : null}
-                  </div>
-                  {open ? (
-                    <div className="library-section-body">
-                      {section.id === "workspaces" ? (
-                        <>
-                          <div className="workspace-list">{workspaces.map((workspace, index) => <button className={workspace.id === activeWorkspaceId ? "active" : ""} key={workspace.id} onClick={() => { setActiveWorkspaceId(workspace.id); setSelectedNodeIds([]); setSelectedEdgeIds([]); }}><i>{String(index + 1).padStart(2, "0")}</i><span>{workspace.workspaceTitle ?? workspace.title}</span><small>{workspace.scenes?.length ?? 1}</small></button>)}</div>
-                          <div className="workspace-manager">
-                            <label>ACTIVE WORKSPACE</label>
-                            <input aria-label="Workspace name" value={document.workspaceTitle ?? document.title} onChange={(event) => updateWorkspace({ ...document, workspaceTitle: event.target.value })} />
-                            <div><button onClick={duplicateWorkspace}>Duplicate</button><button onClick={() => setHistoryOpen(true)}>History</button><button className="danger" disabled={workspaces.length === 1} onClick={deleteWorkspace}>Delete</button></div>
-                          </div>
-                        </>
-                      ) : null}
-                      {section.id === "examples" ? (
-                        <div className="sample-library">{diagramSamples.map((sample) => <button key={sample.id} onClick={() => createSampleWorkspace(sample)}><i>{String(sample.number).padStart(2, "0")}</i><strong>{sample.label}</strong><small>{sample.description}</small></button>)}</div>
-                      ) : null}
-                      {section.id === "components" ? (
-                        <>
-                          <label className="search"><span>⌕</span><input aria-label="Search primitives" onChange={(event) => setSearch(event.target.value)} placeholder="Search technology" value={search} /></label>
-                          <div className={`primitive-tree primitive-tree--${libraryView}`}>{primitiveGroups.map(([group, primitives]) => primitives.length ? <details open={search.trim().length > 0 || !collapsedCategories.has(group)} key={group}><summary onClick={(event) => { event.preventDefault(); setCollapsedCategories((current) => { const next = new Set(current); if (next.has(group)) next.delete(group); else next.add(group); return next; }); }}><span>{group}</span><b>{primitives.length}</b></summary><div className={`primitive-list primitive-list--${libraryView}`}>{primitives.map(renderPrimitive)}</div></details> : null)}</div>
-                        </>
-                      ) : null}
-                      {section.id === "providers" ? (
-                        <div className="provider-block"><b>AWS</b><b>GCP</b><b>K8s</b><b>+{Math.max(0, technologyOptions.length - 3)}</b></div>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </section>
-              );
-            })}
-          </div>
+          <div className="panel-heading"><span>WORKSPACES</span><button aria-label="Create workspace" className="panel-add" onClick={createWorkspace}>＋</button></div>
+          <div className="workspace-list">{workspaces.map((workspace, index) => (
+            <div className={`workspace-row${workspace.id === activeWorkspaceId ? " active" : ""}`} key={workspace.id}>
+              <button onClick={() => { setActiveWorkspaceId(workspace.id); setSelectedNodeIds([]); setSelectedEdgeIds([]); }}>
+                <i>{String(index + 1).padStart(2, "0")}</i>
+                <span>{workspace.workspaceTitle ?? workspace.title}</span>
+                <small>{workspace.scenes?.length ?? 1}</small>
+              </button>
+              {workspace.id === activeWorkspaceId ? <MenuBar menus={workspaceMenu} /> : null}
+            </div>
+          ))}</div>
+          <details className="sample-library">
+            <summary><span>CHART EXAMPLES</span><b>{diagramSamples.length}</b></summary>
+            <div>{diagramSamples.map((sample) => <button key={sample.id} onClick={() => createSampleWorkspace(sample)}><i>{String(sample.number).padStart(2, "0")}</i><strong>{sample.label}</strong><small>{sample.description}</small></button>)}</div>
+          </details>
+          <div className="library-divider" />
+          <div className="panel-heading"><span>COMPONENTS</span><div className="component-panel-actions"><button aria-label={componentListCollapsed ? "Expand component list" : "Collapse component list"} onClick={() => setComponentListCollapsed((value) => !value)}>{componentListCollapsed ? "Show" : "Hide"}</button><div className="library-view-switch"><button aria-label="Tree component view" className={libraryView === "tree" ? "active" : ""} onClick={() => setLibraryView("tree")}>Tree</button><button aria-label="Grid component view" className={libraryView === "grid" ? "active" : ""} onClick={() => setLibraryView("grid")}>Grid</button></div></div></div>
+          {!componentListCollapsed ? <><label className="search"><span>⌕</span><input aria-label="Search primitives" onChange={(event) => setSearch(event.target.value)} placeholder="Search technology" value={search} /></label>
+          <div className={`primitive-tree primitive-tree--${libraryView}`}>{primitiveGroups.map(([group, primitives]) => primitives.length ? <details open={search.trim().length > 0 || !collapsedCategories.has(group)} key={group}><summary onClick={(event) => { event.preventDefault(); setCollapsedCategories((current) => { const next = new Set(current); if (next.has(group)) next.delete(group); else next.add(group); return next; }); }}><span>{group}</span><b>{primitives.length}</b></summary><div className={`primitive-list primitive-list--${libraryView}`}>{primitives.map(renderPrimitive)}</div></details> : null)}</div></> : <div className="component-list-collapsed">Component library hidden</div>}
+          <div className="provider-block"><span>PROVIDERS & STACKS</span><div><b>AWS</b><b>GCP</b><b>K8s</b><b>+{Math.max(0, technologyOptions.length - 3)}</b></div></div>
         </aside>
 
         <section className="editor-main">
-          <div className="story-header">
-            <div><span>{document.mode.toUpperCase()} / {intent.toUpperCase()}</span><h1>{document.title}</h1><p>{document.purpose}</p></div>
-            <GlobalAiComposer hasNodes={document.nodes.length > 0} currentFormat={document.format ?? "16:9"} />
-          </div>
-          <div className={`canvas-stage${sceneTransition ? " is-scene-change" : ""}`} data-format={document.format ?? "16:9"}>
+          <div className={`canvas-stage${sceneTransition ? " is-scene-change" : ""}`} data-format={document.format ?? "16:9"} data-intent={presenting ? "publish" : intent}>
             <AssistedCanvas document={document} externalRevision={externalRevision} onDocumentChange={updateWorkspace} onSelectionChange={handleSelection} presenting={presenting} ref={canvasRef} />
             <ProposalControls />
           </div>
+          {/* A page-tab row. 86 px of cards, a name field and three buttons became
+              30 px of chips: rename on double-click, everything else on the ⋯ —
+              which is where you would look for it anyway. */}
           <div className="scene-strip">
-            <span>SCENES</span>
-            <div className="scene-list">{document.scenes!.map((scene, index) => <button className={`scene${scene.id === document.activeSceneId ? " active" : ""}`} key={scene.id} onClick={() => switchScene(scene.id)}><i>{String(index + 1).padStart(2, "0")}</i><b>{scene.name}</b><small>{scene.nodes.length} nodes</small></button>)}</div>
-            <div className="scene-manager"><input aria-label="Scene name" value={document.scenes!.find((scene) => scene.id === document.activeSceneId)?.name ?? ""} onChange={(event) => renameScene(event.target.value)} /><button className="add-scene" onClick={createScene}>＋ Add</button><button onClick={duplicateScene}>Duplicate</button><button className="danger" disabled={document.scenes!.length === 1} onClick={deleteScene}>Delete</button></div>
+            <div className="scene-list">
+              {document.scenes!.map((scene, index) => (
+                <button
+                  className={`scene${scene.id === document.activeSceneId ? " active" : ""}`}
+                  key={scene.id}
+                  onClick={() => switchScene(scene.id)}
+                  onDoubleClick={() => {
+                    const name = window.prompt("Rename scene", scene.name)?.trim();
+                    if (name) { switchScene(scene.id); renameScene(name); }
+                  }}
+                  title={`${scene.name} · ${scene.nodes.length} components · double-click to rename`}
+                >
+                  <i>{String(index + 1).padStart(2, "0")}</i>
+                  <b>{scene.name}</b>
+                  <em>{scene.nodes.length}</em>
+                </button>
+              ))}
+              <button aria-label="Add scene" className="scene-add" onClick={createScene} title="Add a scene">＋</button>
+            </div>
+            <MenuBar menus={sceneMenu} />
           </div>
         </section>
 
@@ -728,6 +841,14 @@ export function EditorShell() {
             </section>
           ) : selectedNodes.length ? (
             <section className="selection-editor">
+              {/* Three tabs instead of one 2,007 px scroll. Nothing was removed;
+                  each pane now fits the panel. */}
+              <div className="inspector-tabs" role="tablist">
+                {(["content", "style", "layout"] as const).map((tab) => (
+                  <button aria-selected={inspectorTab === tab} className={inspectorTab === tab ? "active" : ""} key={tab} onClick={() => setInspectorTab(tab)} role="tab" type="button">{tab}</button>
+                ))}
+              </div>
+              <div className="inspector-pane" hidden={inspectorTab !== "content"}>
               <label>SELECTED · {selectedNodes.length}</label>
               {selectedNodes.length > 1 ? <div className="multi-selection-actions"><p>Style changes apply to all {selectedNodes.length} selected components.</p><div><button onClick={() => canvasRef.current?.groupSelection(selectedNodeIds)}>Group</button><button onClick={() => canvasRef.current?.ungroupSelection(selectedNodeIds)}>Ungroup</button></div></div> : null}
               {selectedNodes.length === 1 ? <>
@@ -745,6 +866,15 @@ export function EditorShell() {
                 {selectedNodes.length > 1 ? <option value="" disabled>Choose type</option> : null}
                 {Object.keys(roleColors).map((role) => <option key={role} value={role}>{role}</option>)}
               </select>
+              <span>Technology icon</span>
+              <IconPicker
+                matches={(technology) => technology === undefined
+                  ? selectedNodes.every((node) => !node.technology)
+                  : selectedNodes.every((node) => node.technology === technology)}
+                onSelect={(technology) => updateSelected({ technology })}
+              />
+              </div>
+              <div className="inspector-pane" hidden={inspectorTab !== "style"}>
               <span>Color</span>
               <div className="color-editor">
                 {colorPresets.map((color) => <button aria-label={`Set color ${color}`} className={selectedNodes.every((node) => node.color.toLowerCase() === color) ? "active" : ""} key={color} onClick={() => updateSelected({ color })} style={{ "--swatch": color } as React.CSSProperties} />)}
@@ -789,6 +919,8 @@ export function EditorShell() {
               </div>
               <span>Effect speed · {(selectedNodes[0]?.speed ?? 2.1).toFixed(1)} s</span>
               <input aria-label="Component effect speed" className="line-thickness" disabled={selectedNodes.every((node) => node.effect === "none")} type="range" min="0.4" max="6" step="0.1" value={selectedNodes[0]?.speed ?? 2.1} onChange={(event) => updateSelected({ speed: Number(event.target.value) })} />
+              </div>
+              <div className="inspector-pane" hidden={inspectorTab !== "layout"}>
               <span>Background image</span>
               <input aria-label="Component background image URL" disabled={selectedNodes.length === 1 && Boolean(assetIdOf(selectedNodes[0].backgroundImage))} placeholder="https://…" value={selectedNodes.length !== 1 ? "" : assetIdOf(selectedNodes[0].backgroundImage) ? "Uploaded image" : selectedNodes[0].backgroundImage ?? ""} onChange={(event) => updateSelected({ backgroundImage: event.target.value })} />
               <div className="background-editor">
@@ -800,13 +932,7 @@ export function EditorShell() {
               <input aria-label="Component background opacity" className="line-thickness" disabled={selectedNodes.every((node) => !node.backgroundImage)} type="range" min="0" max="1" step="0.05" value={selectedNodes[0]?.backgroundOpacity ?? 0.28} onChange={(event) => updateSelected({ backgroundOpacity: Number(event.target.value) })} />
               <span>Layer · z {selectedNodes[0]?.zIndex ?? 1}</span>
               <div className="z-index-editor"><button onClick={() => updateSelected({ zIndex: Math.max(-20, (selectedNodes[0]?.zIndex ?? 1) - 1) })}>Send back</button><input aria-label="Component z-index" type="number" min="-20" max="100" value={selectedNodes[0]?.zIndex ?? 1} onChange={(event) => updateSelected({ zIndex: numberFieldValue(event.target.value, selectedNodes[0]?.zIndex ?? 1, -20, 100) })} /><button onClick={() => updateSelected({ zIndex: Math.min(100, (selectedNodes[0]?.zIndex ?? 1) + 1) })}>Bring front</button></div>
-              <span>Technology icon</span>
-              <IconPicker
-                matches={(technology) => technology === undefined
-                  ? selectedNodes.every((node) => !node.technology)
-                  : selectedNodes.every((node) => node.technology === technology)}
-                onSelect={(technology) => updateSelected({ technology })}
-              />
+              </div>
               <button className="delete-selection" onClick={() => canvasRef.current?.deleteSelection(selectedNodeIds, [])}>Delete component{selectedNodeIds.length > 1 ? "s" : ""}</button>
             </section>
           ) : <section className="selection-empty"><label>SELECTION</label><p>Select components or connections to edit their visual and technical properties.</p></section>}
@@ -828,13 +954,12 @@ export function EditorShell() {
       ) : null}
       <AiConnectionSettings open={configOpen} onClose={() => setConfigOpen(false)} />
       <AccountDialog
-        initialMode={accountOpen ?? "sign-in"}
-        onClose={() => setAccountOpen(null)}
+        onClose={() => setAccountOpen(false)}
         onCreateAccount={createAccount}
         onSignIn={signIn}
         onSignOut={signOut}
         onSyncNow={syncNow}
-        open={accountOpen !== null}
+        open={accountOpen}
         session={session}
         state={syncState}
       />

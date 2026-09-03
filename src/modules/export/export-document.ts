@@ -5,6 +5,9 @@ import { Position } from "@xyflow/react";
 import { GIFEncoder, applyPalette, quantize } from "gifenc";
 import { serializeWorkspaceFile } from "@/modules/projects/workspace-file";
 import { inlineAssets } from "@/modules/projects/asset-urls";
+// The canvas draws this same rectangle, so the frame on screen and the file
+// that comes out are the same thing by construction.
+import { exportBounds as dimensions } from "@/modules/diagram/bounds";
 
 const nodeWidth = 220;
 const nodeHeight = 104;
@@ -40,32 +43,6 @@ function escapeXml(value: string) {
   }[character] ?? character));
 }
 
-function dimensions(document: DiagramDocument) {
-  const format = document.format ?? "16:9";
-  const target = format === "1:1" ? { width: 960, height: 960 }
-    : format === "4:5" ? { width: 960, height: 1200 }
-      : format === "9:16" ? { width: 720, height: 1280 }
-        : { width: 1280, height: 720 };
-  if (document.nodes.length === 0) return { minX: 0, minY: 0, ...target };
-  let minX = Math.min(...document.nodes.map((node) => node.position.x)) - padding;
-  let minY = Math.min(...document.nodes.map((node) => node.position.y)) - padding - 68;
-  const maxX = Math.max(...document.nodes.map((node) => node.position.x + (node.size?.width ?? nodeWidth))) + padding;
-  const maxY = Math.max(...document.nodes.map((node) => node.position.y + (node.size?.height ?? nodeHeight) + (node.caption ? 20 : 0) + (node.note ? 18 : 0))) + padding;
-  let width = Math.max(target.width, maxX - minX);
-  let height = Math.max(target.height, maxY - minY);
-  if (format === "full") return { minX, minY, width, height };
-  const aspect = target.width / target.height;
-  if (width / height > aspect) {
-    const nextHeight = width / aspect;
-    minY -= (nextHeight - height) / 2;
-    height = nextHeight;
-  } else {
-    const nextWidth = height * aspect;
-    minX -= (nextWidth - width) / 2;
-    width = nextWidth;
-  }
-  return { minX, minY, width, height };
-}
 
 function portPosition(port: DiagramPort["id"]) {
   if (port === "input") return Position.Left;
