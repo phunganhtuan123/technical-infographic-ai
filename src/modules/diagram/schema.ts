@@ -69,6 +69,8 @@ export const diagramPlanSchema = z.object({
       detail: z.string().optional(),
       caption: z.string().optional(),
       lane: z.enum(["entry", "core", "async", "data"]).default("core"),
+      effect: z.enum(["none", "pulse", "trail", "glow", "scan", "breathe"]).optional(),
+      speed: z.number().min(0.4).max(6).optional(),
     }),
   ),
   edges: z.array(

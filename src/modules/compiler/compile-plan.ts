@@ -4,8 +4,47 @@ import {
   type DiagramDocument,
   type DiagramEdge,
   type DiagramPlan,
+  type EdgeEffect,
+  type NodeEffect,
 } from "@/modules/diagram/schema";
 import { defaultNodeTypography, defaultPorts } from "@/modules/diagram/factory";
+
+// Motion carries meaning here, so it is derived rather than uniform: a reader
+// should be able to tell a queue from a datastore, or a fire-and-forget event
+// from a synchronous call, without reading a single label. Anything the plan
+// states explicitly still wins — these are only the defaults.
+
+/** What a component does decides how it moves. */
+function nodeEffect(role: DiagramPlan["nodes"][number]["role"]): NodeEffect {
+  switch (role) {
+    // Containers and annotations frame the diagram; animating them is noise.
+    case "zone": case "group": case "text": case "note":
+      return "none";
+    // Where the story enters or leaves — a slow swell, not a heartbeat.
+    case "actor": case "start": case "end": case "manual-input": case "input-output": case "off-page":
+      return "breathe";
+    // Things that hold state sit still and glow rather than move.
+    case "database": case "cache": case "stored-data": case "document":
+      return "glow";
+    // Work happening out of band reads as a sweep.
+    case "worker": case "event-bus": case "agent": case "delay": case "connector": case "merge":
+      return "scan";
+    // The synchronous path beats.
+    default:
+      return "pulse";
+  }
+}
+
+/** What a connection means decides how it moves. */
+function edgeEffect(semantics: DiagramPlan["edges"][number]["semantics"]): EdgeEffect {
+  switch (semantics) {
+    case "event": return "dash";      // fire-and-forget: marching, not travelling
+    case "data": return "trail";      // a read or write leaves a wake
+    case "feedback": return "signal"; // something coming back
+    case "failure": return "dash";
+    default: return "pulse";          // request and success: a travelling beat
+  }
+}
 
 function compileEdge(
   edge: DiagramPlan["edges"][number],
@@ -18,7 +57,7 @@ function compileEdge(
     thickness: edge.thickness ?? (edge.important ? 1.8 : 1.2),
     color,
     strokeStyle: edge.strokeStyle ?? (edge.semantics === "event" || edge.semantics === "feedback" ? "dashed" : "solid"),
-    effect: edge.effect ?? "pulse",
+    effect: edge.effect ?? edgeEffect(edge.semantics),
     speed: edge.speed ?? (edge.semantics === "event" ? 2.7 : 2.1),
     labelOffset: { x: 0, y: 0 },
   } as const;
@@ -71,8 +110,9 @@ export function compilePlan(input: DiagramPlan): DiagramDocument {
       ...defaultNodeTypography(node.role),
       borderStyle: "solid",
       borderWidth: 1,
-      effect: "none",
-      speed: 2.1,
+      effect: node.effect ?? nodeEffect(node.role),
+      // Async work reads better a touch quicker than the synchronous path.
+      speed: node.speed ?? (node.lane === "async" ? 2.6 : 2.1),
       size: node.role === "zone" ? { width: 520, height: 300 } : node.role === "group" ? { width: 440, height: 260 } : node.role === "text" ? { width: 240, height: 72 } : node.role === "note" ? { width: 240, height: 136 } : { width: 220, height: 104 },
       labelPosition: node.role === "zone" || node.role === "group" ? { side: "top", offset: 0.16 } : undefined,
       ports: defaultPorts,

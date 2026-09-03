@@ -6,10 +6,11 @@ import type { DiagramDocument } from "@/modules/diagram/schema";
 import { buildProposalDocument, createProposalRevealFrames, decorateProposalDocument, proposalChangeCounts, validateProposal } from "./proposal-engine";
 import { sceneFingerprint, scopedDiagramContext } from "./context";
 import { rememberGatewayOrigin } from "@/modules/projects/user-settings";
-import { DirectGatewayConnector, MockGatewayConnector, clearClientGatewayUrl, discoverCapabilities, discoverClientGateway, saveClientGatewayUrl, savePendingProvider, savedClientGatewayUrl, takePendingProvider, type AiConnector, type AiProgress } from "./gateway";
+import { DirectGatewayConnector, MockGatewayConnector, clearClientGatewayUrl, discoverCapabilities, discoverClientGateway, saveClientGatewayUrl, savePendingModel, savePendingProvider, savePendingProviderKey, savedClientGatewayUrl, takePendingModel, takePendingProvider, takePendingProviderKey, type AiConnector, type AiProgress } from "./gateway";
 import { completePkceAuthorization, beginPkceAuthorization } from "./pkce";
 import { sanitizeDiagramImage } from "./image-input";
 import { createThread, loadThread, saveThread, threadContext, updateThreadProposalStatus, type AiThread } from "./thread-store";
+import { BrowserKeyConnector, activeDirectProvider, clearDirectKey, saveDirectKey, savedDirectKey, validateDirectKey, type DirectProviderId } from "./direct-providers";
 import type { AiIntent, AiProvider, DiagramProposal } from "./contracts";
 
 type ProposalState = { proposal: DiagramProposal; document: DiagramDocument; fingerprint: string; targetNodeIds: string[]; targetEdgeIds: string[]; stale: boolean; building: boolean; buildProgress?: string };
@@ -26,11 +27,13 @@ type AssistantContextValue = {
   gatewayOrigin?: string;
   proposal?: ProposalState;
   session?: AiThread;
-  connect(gatewayUrl: string, preferredProvider?: string): Promise<void>;
+  connect(gatewayUrl: string, preferredProvider?: string, preferredModel?: string, providerKey?: string): Promise<void>;
   disconnect(): void;
   forgetGateway(): void;
   cancel(): void;
   reject(): void;
+  addProviderKey(provider: "gemini", apiKey: string): Promise<void>;
+  connectWithKey(provider: DirectProviderId, apiKey: string, preferredModel?: string): Promise<void>;
   selectProvider(providerId: "auto" | AiProvider["id"]): void;
   selectModel(model: string): void;
   accept(): Promise<void>;
@@ -83,6 +86,9 @@ export function AiAssistantProvider({ children, document, revision, selectedNode
   const [status, setStatus] = useState("AI disconnected");
   const [activity, setActivity] = useState<AiActivity>();
   const [providerId, setProviderId] = useState<"auto" | AiProvider["id"]>("auto");
+  // The connector mutates its own provider list when a key is added, which React
+  // cannot see. Bumping this is what republishes the context value.
+  const [providersRevision, setProvidersRevision] = useState(0);
   const [model, setModel] = useState("");
   const [gatewayOrigin, setGatewayOrigin] = useState<string>();
   const [proposal, setProposal] = useState<ProposalState>();
@@ -109,6 +115,23 @@ export function AiAssistantProvider({ children, document, revision, selectedNode
 
   useEffect(() => {
     if (process.env.NEXT_PUBLIC_AI_GATEWAY_MOCK === "true") { setStatus("Development AI available"); return; }
+    // A key that is already in this browser needs no pairing and no round trip,
+    // so restoring it first keeps the common case free of any setup at all.
+    const directProvider = activeDirectProvider();
+    const directKey = directProvider ? savedDirectKey(directProvider) : undefined;
+    if (directProvider && directKey && !new URLSearchParams(window.location.search).has("code")) {
+      void validateDirectKey(directProvider, directKey)
+        .then((models) => {
+          const live = new BrowserKeyConnector(directProvider, directKey, models);
+          setConnector(live);
+          setGatewayOrigin("browser-direct");
+          setProviderId(live.providers[0].id);
+          setModel(live.providers[0].defaultModel);
+          setStatus(`${live.providers[0].label} connected`);
+        })
+        .catch(() => setStatus("Saved key no longer works — reconnect in Config"));
+      return;
+    }
     const saved = savedClientGatewayUrl();
     if (!saved) { setStatus("Connect your Client AI Gateway"); return; }
     setGatewayOrigin(saved);
@@ -118,15 +141,28 @@ export function AiAssistantProvider({ children, document, revision, selectedNode
       const token = await completePkceAuthorization();
       if (!token) throw new Error("Client AI authorization callback is incomplete");
       const discovered = await discoverCapabilities(nextMetadata, token);
-      setConnector(new DirectGatewayConnector(nextMetadata, token, discovered));
+      const live = new DirectGatewayConnector(nextMetadata, token, discovered);
       const preferredProvider = takePendingProvider();
-      const selectedProvider = discovered.providers.find((provider) => provider.id === preferredProvider);
-      if (selectedProvider) { setProviderId(selectedProvider.id); setModel(selectedProvider.defaultModel); }
+      const preferredModel = takePendingModel();
+      // A key typed before pairing only reaches the connector now, once there is
+      // a token to send it with. Doing it before the provider is selected keeps
+      // the picker from briefly showing a provider that is not usable yet.
+      const providerKey = takePendingProviderKey();
+      if (providerKey && preferredProvider === "gemini") {
+        try { await live.setProviderKey("gemini", providerKey); }
+        catch (error) { setStatus(error instanceof Error ? error.message : "Could not set the Gemini key"); }
+      }
+      setConnector(live);
+      const selectedProvider = live.providers.find((provider) => provider.id === preferredProvider);
+      if (selectedProvider) {
+        setProviderId(selectedProvider.id);
+        setModel(preferredModel && selectedProvider.models.includes(preferredModel) ? preferredModel : selectedProvider.defaultModel);
+      }
       setStatus(`${selectedProvider?.label ?? "Client AI"} connected`);
     }).catch((error) => setStatus(error instanceof Error ? error.message : "Client AI Gateway unavailable"));
   }, []);
 
-  const connect = useCallback(async (gatewayUrl: string, preferredProvider?: string) => {
+  const connect = useCallback(async (gatewayUrl: string, preferredProvider?: string, preferredModel?: string, providerKey?: string) => {
     try {
       if (process.env.NEXT_PUBLIC_AI_GATEWAY_MOCK === "true") {
         setConnector(new MockGatewayConnector());
@@ -134,7 +170,7 @@ export function AiAssistantProvider({ children, document, revision, selectedNode
         setStatus("Development AI connected");
         return;
       }
-      const connectionLabel = preferredProvider === "codex" ? "Codex Local" : preferredProvider === "anthropic" ? "Claude Local" : "Organization Gateway";
+      const connectionLabel = preferredProvider === "codex" ? "Codex Local" : preferredProvider === "anthropic" ? "Claude Local" : preferredProvider === "local" ? "Local Model" : preferredProvider === "gemini" ? "Gemini" : "Organization Gateway";
       setStatus(`Discovering ${connectionLabel}`);
       const discoveredGateway = await discoverClientGateway(gatewayUrl);
       const nextMetadata = discoveredGateway.metadata;
@@ -151,12 +187,48 @@ export function AiAssistantProvider({ children, document, revision, selectedNode
       // …and to the account, so a second machine does not ask for it again.
       void rememberGatewayOrigin(discoveredGateway.origin);
       savePendingProvider(preferredProvider);
+      savePendingModel(preferredModel);
+      savePendingProviderKey(providerKey);
       await beginPkceAuthorization(nextMetadata);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Client AI Gateway unavailable");
       throw error;
     }
   }, []);
+
+  const connectWithKey = useCallback(async (provider: DirectProviderId, apiKey: string, preferredModel?: string) => {
+    setStatus("Checking key");
+    try {
+      // Validating by listing models does double duty: it rejects a bad key at
+      // the point it was pasted, and the list it returns is the model picker.
+      const models = await validateDirectKey(provider, apiKey);
+      const live = new BrowserKeyConnector(provider, apiKey, models);
+      saveDirectKey(provider, apiKey);
+      setConnector(live);
+      setGatewayOrigin("browser-direct");
+      setProviderId(live.providers[0].id);
+      setModel(preferredModel && models.includes(preferredModel) ? preferredModel : live.providers[0].defaultModel);
+      setStatus(`${live.providers[0].label} connected`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not use that key");
+      throw error;
+    }
+  }, []);
+
+  // Adding a key to a connection that already exists: no redirect needed, the
+  // connector re-discovers its backends and the picker refreshes in place.
+  const addProviderKey = useCallback(async (provider: "gemini", apiKey: string) => {
+    if (!(connector instanceof DirectGatewayConnector)) { setStatus("Connect the local connector before adding a key"); return; }
+    try {
+      const providers = await connector.setProviderKey(provider, apiKey);
+      const added = providers.find((entry) => entry.id === provider);
+      if (added) { setProviderId(added.id); setModel(added.defaultModel); }
+      setProvidersRevision((value) => value + 1);
+      setStatus(added ? `${added.label} connected` : "Key saved");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not save the key");
+    }
+  }, [connector]);
 
   const disconnect = useCallback(() => {
     controllerRef.current?.abort();
@@ -169,6 +241,8 @@ export function AiAssistantProvider({ children, document, revision, selectedNode
 
   const forgetGateway = useCallback(() => {
     disconnect();
+    const directProvider = activeDirectProvider();
+    if (directProvider) clearDirectKey(directProvider);
     clearClientGatewayUrl();
     setGatewayOrigin(undefined);
     setProviderId("auto");
@@ -339,7 +413,7 @@ export function AiAssistantProvider({ children, document, revision, selectedNode
     setProviderId(nextProviderId);
     setModel(nextProviderId === "auto" ? "" : connector?.providers.find((provider) => provider.id === nextProviderId)?.defaultModel ?? "");
   }, [connector]);
-  const value = useMemo<AssistantContextValue>(() => ({ connected: Boolean(connector), busy, status, activity, providers: connector?.providers ?? [], providerId, model, gatewayOrigin, proposal, session, connect, disconnect, forgetGateway, cancel, reject, selectProvider, selectModel: setModel, accept, send, sendSession, clearSession }), [accept, activity, busy, cancel, clearSession, connect, connector, disconnect, forgetGateway, gatewayOrigin, model, proposal, providerId, reject, selectProvider, send, sendSession, session, status]);
+  const value = useMemo<AssistantContextValue>(() => ({ connected: Boolean(connector), busy, status, activity, providers: connector?.providers ?? [], providerId, model, gatewayOrigin, proposal, session, connect, connectWithKey, disconnect, forgetGateway, cancel, reject, addProviderKey, selectProvider, selectModel: setModel, accept, send, sendSession, clearSession }), [accept, activity, addProviderKey, busy, cancel, clearSession, connect, connectWithKey, connector, disconnect, forgetGateway, gatewayOrigin, model, proposal, providerId, providersRevision, reject, selectProvider, send, sendSession, session, status]);
   return <AssistantContext.Provider value={value}>{children}</AssistantContext.Provider>;
 }
 
@@ -444,95 +518,195 @@ export function GlobalAiComposer({ hasNodes, currentFormat }: { hasNodes: boolea
   </div>;
 }
 
-const localConnectorUrl = "http://127.0.0.1:47821";
+// Where the local connector is answering. The connector is loopback-only by
+// default, so 127.0.0.1 stays the default. A deployed editor whose CLI lives on
+// the server sets NEXT_PUBLIC_AI_CONNECTOR_URL — either an explicit origin, or
+// "same-host" to reuse whatever hostname served this page, which keeps one
+// build working across every address the editor is reachable on.
+const connectorSetting = process.env.NEXT_PUBLIC_AI_CONNECTOR_URL?.trim();
+// An empty value is a real setting, not a missing one: it says "no port, the
+// connector is proxied under this origin". Only an absent variable falls back.
+const connectorPortSetting = process.env.NEXT_PUBLIC_AI_CONNECTOR_PORT;
+const connectorPort = connectorPortSetting === undefined ? "47821" : connectorPortSetting.trim();
 
-// The Local buttons only work if a connector is answering on this machine AND
-// the browser is willing to let this page reach it. Chrome 142+ gates that
-// behind a Local Network Access prompt, Safari is stricter still, and a plain
-// click on a dead button just produces a cryptic failure. So probe first, and
-// keep the buttons off until we know they will do something.
-type LocalProbe =
+// The connector on the viewer's own machine. A CLI login can only be read by a
+// process on the machine holding it, so Claude CLI and Codex CLI can never come
+// from the server — this address is the only place they can come from.
+const ownMachineConnectorUrl = "http://127.0.0.1:47821";
+
+function resolveConnectorUrl() {
+  if (connectorSetting && connectorSetting !== "same-host") return connectorSetting.replace(/\/$/, "");
+  if (connectorSetting === "same-host" && typeof window !== "undefined") {
+    // No port configured means the connector is proxied under this origin —
+    // same scheme, same host, whatever port the page itself is on. That is the
+    // only arrangement that works from an HTTPS page, since a browser will not
+    // let it call a plain-http address.
+    return connectorPort ? `${window.location.protocol}//${window.location.hostname}:${connectorPort}` : window.location.origin;
+  }
+  return `http://127.0.0.1:${connectorPort || "47821"}`;
+}
+
+// A connector answers only if one is running AND the browser will let this page
+// reach it. For the viewer's own machine that is the harder half: Chrome 142+
+// gates loopback behind a Local Network Access prompt and Safari is stricter
+// still, so probe before enabling any button rather than let a click fail
+// cryptically.
+export type BackendDetail = { id: string; label: string; models: string[]; defaultModel: string; vision?: boolean };
+
+type Probe =
   | { state: "checking" }
-  | { state: "ready"; backends: string[] }
+  | { state: "ready"; backends: string[]; details: BackendDetail[] }
   | { state: "unreachable"; reason: string };
 
-function useLocalConnector(open: boolean) {
-  const [probe, setProbe] = useState<LocalProbe>({ state: "checking" });
+async function probeConnector(url: string): Promise<Probe> {
+  try {
+    const response = await fetch(new URL("/.well-known/technical-infographic-ai", url), {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`the connector answered ${response.status}`);
+    const metadata = await response.json() as { backends?: string[]; backendDetails?: BackendDetail[] };
+    const details = Array.isArray(metadata.backendDetails) ? metadata.backendDetails : [];
+    return { state: "ready", backends: Array.isArray(metadata.backends) ? metadata.backends : details.map((detail) => detail.id), details };
+  } catch (error) {
+    // A blocked request and a connector that is not running both surface as the
+    // same opaque network error, so say both rather than guess.
+    const reason = error instanceof DOMException && error.name === "TimeoutError"
+      ? "It did not answer in time."
+      : "Either it is not running, or this browser is blocking a page on the web from reaching your machine.";
+    return { state: "unreachable", reason };
+  }
+}
+
+function useConnectorProbes(open: boolean) {
+  const [server, setServer] = useState<Probe>({ state: "checking" });
+  const [own, setOwn] = useState<Probe>({ state: "checking" });
 
   const check = useCallback(async () => {
-    setProbe({ state: "checking" });
-    try {
-      const response = await fetch(new URL("/.well-known/technical-infographic-ai", localConnectorUrl), {
-        cache: "no-store",
-        headers: { Accept: "application/json" },
-        signal: AbortSignal.timeout(3000),
-      });
-      if (!response.ok) throw new Error(`the connector answered ${response.status}`);
-      const metadata = await response.json() as { backends?: string[] };
-      setProbe({ state: "ready", backends: Array.isArray(metadata.backends) ? metadata.backends : [] });
-    } catch (error) {
-      // A blocked request and a connector that is not running both surface as
-      // the same opaque network error, so say both rather than guess.
-      const secure = typeof window !== "undefined" && window.location.protocol === "https:";
-      const reason = error instanceof DOMException && error.name === "TimeoutError"
-        ? "The connector did not answer in time."
-        : secure
-          ? "Either the connector is not running, or this browser is blocking a page on the web from reaching your machine."
-          : "The connector does not seem to be running.";
-      setProbe({ state: "unreachable", reason });
-    }
+    setServer({ state: "checking" });
+    setOwn({ state: "checking" });
+    await Promise.all([
+      probeConnector(resolveConnectorUrl()).then(setServer),
+      probeConnector(ownMachineConnectorUrl).then(setOwn),
+    ]);
   }, []);
 
-  useEffect(() => {
-    if (open) void check();
-  }, [check, open]);
-
-  return { probe, check };
+  useEffect(() => { if (open) void check(); }, [check, open]);
+  return { server, own, check };
 }
+
+// Six ways in, differing only in where the AI runs and what has to be supplied.
+type CardKind = "server" | "own-machine" | "key";
+type ConnectionCard = {
+  provider: string;
+  kind: CardKind;
+  mark: string;
+  markClass: string;
+  title: string;
+  blurb: string;
+  missing: string;
+  keyHint?: string;
+  keyHelp?: string;
+};
+
+const connectionCards: ConnectionCard[] = [
+  { provider: "local", kind: "server", mark: "OL", markClass: "is-local", title: "Local Model", blurb: "A model running on the editor's own server. Nothing to install and nothing to pay — the slowest of the options, and best for drafts.", missing: "model server" },
+  { provider: "anthropic", kind: "own-machine", mark: "CL", markClass: "is-claude", title: "Claude CLI", blurb: "The Claude Code login already on YOUR machine. Uses your existing subscription, so no key and no per-token cost. Needs the connector running.", missing: "Claude CLI" },
+  { provider: "codex", kind: "own-machine", mark: "CX", markClass: "is-codex", title: "Codex CLI", blurb: "The Codex login already on YOUR machine. Uses your existing subscription. Needs the connector running.", missing: "Codex CLI" },
+  { provider: "anthropic-api", kind: "key", mark: "AK", markClass: "is-claude", title: "Claude API key", blurb: "Nothing to install. Your browser calls Anthropic directly and the key never reaches this server. Billed to your API account, not a Pro/Max plan.", missing: "", keyHint: "sk-ant-…", keyHelp: "console.anthropic.com → API keys" },
+  { provider: "gemini", kind: "key", mark: "GM", markClass: "is-gemini", title: "Gemini API key", blurb: "Nothing to install. Your browser calls Google directly. A free AI Studio key works and reads attached images.", missing: "", keyHint: "AIza…", keyHelp: "aistudio.google.com → Get API key" },
+  { provider: "openai", kind: "key", mark: "OA", markClass: "is-openai", title: "OpenAI API key", blurb: "Nothing to install. Your browser calls OpenAI directly and the key never reaches this server. Billed to your API account.", missing: "", keyHint: "sk-…", keyHelp: "platform.openai.com → API keys" },
+];
 
 export function AiConnectionSettings({ open, onClose }: { open: boolean; onClose(): void }) {
   const ai = useAiAssistant();
   const [gatewayUrl, setGatewayUrl] = useState("");
-  const { probe, check } = useLocalConnector(open);
-  useEffect(() => { if (ai.gatewayOrigin && ai.gatewayOrigin !== "local-mock") setGatewayUrl(ai.gatewayOrigin); }, [ai.gatewayOrigin]);
+  const [models, setModels] = useState<Record<string, string>>({});
+  const [keys, setKeys] = useState<Record<string, string>>({});
+  const { server, own, check } = useConnectorProbes(open);
+  useEffect(() => { if (ai.gatewayOrigin && !["local-mock", "browser-direct"].includes(ai.gatewayOrigin)) setGatewayUrl(ai.gatewayOrigin); }, [ai.gatewayOrigin]);
   if (!open) return null;
 
-  const localReady = probe.state === "ready";
-  const localBusy = probe.state === "checking";
-  const has = (provider: string) => localReady && (probe.backends.length === 0 || probe.backends.includes(provider));
-  const unavailable = (provider: string, cli: string) => {
-    if (localBusy) return "Looking for a connector on this machine…";
-    if (probe.state === "unreachable") return `No connector on this machine. ${probe.reason} Start it with: npx technical-infographic-connector`;
-    if (!has(provider)) return `A connector is running, but it did not find the ${cli} on this machine.`;
+  const probeFor = (card: ConnectionCard) => card.kind === "server" ? server : own;
+  const detailFor = (card: ConnectionCard) => {
+    const probe = probeFor(card);
+    return probe.state === "ready" ? probe.details.find((detail) => detail.id === card.provider) : undefined;
+  };
+
+  const unavailable = (card: ConnectionCard) => {
+    if (card.kind === "key") return undefined;
+    const probe = probeFor(card);
+    if (probe.state === "checking") return "Looking for a connector…";
+    if (probe.state === "unreachable") {
+      return card.kind === "server"
+        ? `The editor's own AI is not answering. ${probe.reason}`
+        : `No connector on your machine. ${probe.reason} Set it up below.`;
+    }
+    if (!probe.backends.includes(card.provider)) {
+      return card.kind === "server"
+        ? "The editor's server does not offer this."
+        : `Your connector is running, but it did not find the ${card.missing} on your machine.`;
+    }
     return undefined;
   };
-  const codexBlocked = unavailable("codex", "Codex CLI");
-  const claudeBlocked = unavailable("anthropic", "Claude CLI");
-  const connect = (url: string, provider?: string) => void ai.connect(url, provider).catch(() => undefined);
+
+  const connect = (card: ConnectionCard) => {
+    const detail = detailFor(card);
+    const model = models[card.provider] ?? detail?.defaultModel;
+    if (card.kind === "key") {
+      const key = keys[card.provider]?.trim();
+      if (!key) return;
+      void ai.connectWithKey(card.provider as DirectProviderId, key, model)
+        .then(() => setKeys((current) => ({ ...current, [card.provider]: "" })))
+        .catch(() => undefined);
+      return;
+    }
+    const url = card.kind === "server" ? resolveConnectorUrl() : ownMachineConnectorUrl;
+    void ai.connect(url, card.provider, model).catch(() => undefined);
+  };
+
   const activeProvider = ai.providers.find((provider) => provider.id === ai.providerId);
+  const ownReady = own.state === "ready";
+  const downloadCommand = `curl -fsSL ${typeof window === "undefined" ? "" : window.location.origin}/connector -o ti-connector.mjs && node ti-connector.mjs --editor ${typeof window === "undefined" ? "" : window.location.origin}`;
+
   return <div className="config-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section aria-label="Application configuration" aria-modal="true" className="config-dialog" role="dialog">
-      <header><div><span>CONFIGURATION</span><h2>AI connections</h2><p>Use AI authenticated and owned by this client.</p></div><button aria-label="Close configuration" onClick={onClose}>×</button></header>
-      <div className={`ai-config-status${ai.connected ? " is-connected" : ""}`}><i /><div><strong>{ai.connected ? activeProvider?.label ?? "Client AI connected" : "No active AI connection"}</strong><small>{ai.status}{ai.gatewayOrigin ? ` · ${ai.gatewayOrigin}` : ""}</small></div>{ai.connected ? <><button onClick={ai.disconnect}>Disconnect</button><button onClick={ai.forgetGateway}>Forget</button></> : null}</div>
+      <header><div><span>CONFIGURATION</span><h2>AI connections</h2><p>Pick where the AI runs. Prompts and diagrams go straight from this page to whatever you choose.</p></div><button aria-label="Close configuration" onClick={onClose}>×</button></header>
+      <div className={`ai-config-status${ai.connected ? " is-connected" : ""}`}><i /><div><strong>{ai.connected ? activeProvider?.label ?? "AI connected" : "No active AI connection"}</strong><small>{ai.status}{ai.gatewayOrigin && ai.gatewayOrigin !== "browser-direct" ? ` · ${ai.gatewayOrigin}` : ""}</small></div>{ai.connected ? <><button onClick={ai.disconnect}>Disconnect</button><button onClick={ai.forgetGateway}>Forget</button></> : null}</div>
       <div className="ai-connection-grid">
-        <article className={codexBlocked ? "is-unavailable" : ""} title={codexBlocked}>
-          <div className="connection-mark is-codex">CX</div>
-          <div><strong>Codex Local</strong><p>Use the Codex CLI login on this machine. No OpenAI API key enters the editor.</p>{codexBlocked ? <small className="blocked-note">{codexBlocked}</small> : <small>Ready — the connector found the Codex CLI here.</small>}</div>
-          <button disabled={ai.busy || Boolean(codexBlocked)} onClick={() => connect(localConnectorUrl, "codex")} title={codexBlocked}>Connect Codex</button>
-        </article>
-        <article className={claudeBlocked ? "is-unavailable" : ""} title={claudeBlocked}>
-          <div className="connection-mark is-claude">CL</div>
-          <div><strong>Claude Local</strong><p>Use the Claude Code login already held by the CLI on this machine.</p>{claudeBlocked ? <small className="blocked-note">{claudeBlocked}</small> : <small>Ready — the connector found the Claude CLI here.</small>}</div>
-          <button disabled={ai.busy || Boolean(claudeBlocked)} onClick={() => connect(localConnectorUrl, "anthropic")} title={claudeBlocked}>Connect Claude</button>
-        </article>
-        <article className="is-organization"><div className="connection-mark is-gateway">GW</div><div><strong>Organization Gateway</strong><p>Connect to an AI Gateway controlled by your organization through SSO.</p><input aria-label="Organization AI Gateway URL" inputMode="url" placeholder="https://ai.your-company.com" value={gatewayUrl} onChange={(event) => setGatewayUrl(event.target.value)} /></div><button disabled={ai.busy || !gatewayUrl.trim()} onClick={() => connect(gatewayUrl)}>Continue with SSO</button></article>
+        {connectionCards.map((card) => {
+          const blocked = unavailable(card);
+          const detail = detailFor(card);
+          const live = ai.providers.find((provider) => provider.id === card.provider);
+          const options = detail?.models ?? live?.models ?? [];
+          const chosen = models[card.provider] ?? detail?.defaultModel ?? live?.defaultModel ?? "";
+          const needsKey = card.kind === "key";
+          return <article className={blocked ? "is-unavailable" : ""} key={card.provider} title={blocked}>
+            <div className={`connection-mark ${card.markClass}`}>{card.mark}</div>
+            <div>
+              <strong>{card.title}</strong>
+              <p>{card.blurb}</p>
+              {blocked ? <small className="blocked-note">{blocked}</small> : null}
+              {!blocked && detail ? <small>Ready — {detail.label}.</small> : null}
+              {needsKey && live ? <small>Connected. Paste a new key to replace it.</small> : null}
+              {needsKey && !live && card.keyHelp ? <small>Get one at {card.keyHelp}</small> : null}
+              {needsKey ? <input aria-label={`${card.title}`} autoComplete="off" placeholder={card.keyHint} spellCheck={false} type="password" value={keys[card.provider] ?? ""} onChange={(event) => setKeys((current) => ({ ...current, [card.provider]: event.target.value }))} /> : null}
+              {options.length > 1 ? <select aria-label={`${card.title} model`} value={chosen} onChange={(event) => setModels((current) => ({ ...current, [card.provider]: event.target.value }))}>{options.map((model) => <option key={model} value={model}>{model}</option>)}</select> : null}
+            </div>
+            <button disabled={ai.busy || Boolean(blocked) || (needsKey && !keys[card.provider]?.trim())} onClick={() => connect(card)} title={blocked}>
+              {needsKey && live ? "Replace key" : `Connect ${card.title.split(" ")[0]}`}
+            </button>
+          </article>;
+        })}
+        <article className="is-organization"><div className="connection-mark is-gateway">GW</div><div><strong>Organization Gateway</strong><p>Connect to an AI Gateway controlled by your organization through SSO.</p><input aria-label="Organization AI Gateway URL" inputMode="url" placeholder="https://ai.your-company.com" value={gatewayUrl} onChange={(event) => setGatewayUrl(event.target.value)} /></div><button disabled={ai.busy || !gatewayUrl.trim()} onClick={() => void ai.connect(gatewayUrl).catch(() => undefined)}>Continue with SSO</button></article>
       </div>
-      <footer className={probe.state === "unreachable" ? "is-warning" : ""}>
-        <span>LOCAL CONNECTOR</span>
-        {probe.state === "ready"
-          ? <><code>connected · {probe.backends.length ? probe.backends.join(", ") : "no backend reported"}</code><small>Running on 127.0.0.1 only. Credentials stay in the CLI that owns them.</small></>
-          : <><code>npx technical-infographic-connector</code><small>{probe.state === "checking" ? "Looking for a connector on this machine…" : `${probe.reason} Run the command above in a terminal, then check again.`}</small></>}
-        <button className="recheck" disabled={localBusy} onClick={() => void check()}>{localBusy ? "Checking…" : "Check again"}</button>
+      <footer className={ownReady ? "" : "is-warning"}>
+        <span>YOUR MACHINE</span>
+        {ownReady
+          ? <><code>connected · {own.state === "ready" && own.backends.length ? own.backends.join(", ") : "no backend reported"}</code><small>Your CLI login stays on your machine. This page only ever holds a token that expires in 8 hours.</small></>
+          : <><code>{downloadCommand}</code><small>Run this once, in a terminal on your own machine, to use Claude CLI or Codex CLI. Needs Node 20+. Then press Check again.</small></>}
+        <button className="recheck" disabled={own.state === "checking"} onClick={() => void check()}>{own.state === "checking" ? "Checking…" : "Check again"}</button>
       </footer>
     </section>
   </div>;

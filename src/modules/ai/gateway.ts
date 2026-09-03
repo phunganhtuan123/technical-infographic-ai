@@ -11,13 +11,37 @@ export interface AiConnector {
 
 const savedGatewayKey = "technical-infographic-client-ai-gateway";
 const pendingProviderKey = "technical-infographic-pending-ai-provider";
+const pendingModelKey = "technical-infographic-pending-ai-model";
+// Pairing is a full-page redirect, so a key typed before it has to survive the
+// round trip. sessionStorage keeps it to this tab, and it is taken (not read)
+// on the way back, then handed straight to the connector and dropped.
+const pendingKeyKey = "technical-infographic-pending-provider-key";
+
+// A Gateway reached over plain HTTP is only acceptable when it cannot leave the
+// operator's own network: loopback, or an RFC1918/link-local address on the LAN.
+// The local connector is deployed that way when the CLI it fronts lives on a
+// machine other than the one running the browser.
+export function isPrivateGatewayHost(hostname: string) {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") return true;
+  if (host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) return true;
+  const parts = host.split(".");
+  if (parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)) {
+    const [a, b] = parts.map(Number);
+    if (a === 10 || a === 127) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 169 && b === 254) return true;
+  }
+  return false;
+}
 
 export function normalizeClientGatewayUrl(input: string) {
   const candidate = /^https?:\/\//i.test(input.trim()) ? input.trim() : `https://${input.trim()}`;
   const url = new URL(candidate);
   if (url.username || url.password) throw new Error("Gateway URL cannot contain credentials");
-  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) throw new Error("Client AI Gateway must use HTTPS");
+  const local = isPrivateGatewayHost(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) throw new Error("Client AI Gateway must use HTTPS unless it is on a private network");
   return url.origin;
 }
 
@@ -54,6 +78,42 @@ export function takePendingProvider() {
   return providerId;
 }
 
+export function savePendingModel(model?: string) {
+  if (model) sessionStorage.setItem(pendingModelKey, model);
+  else sessionStorage.removeItem(pendingModelKey);
+}
+
+export function takePendingModel() {
+  const model = sessionStorage.getItem(pendingModelKey) ?? undefined;
+  sessionStorage.removeItem(pendingModelKey);
+  return model;
+}
+
+export function savePendingProviderKey(apiKey?: string) {
+  if (apiKey) sessionStorage.setItem(pendingKeyKey, apiKey);
+  else sessionStorage.removeItem(pendingKeyKey);
+}
+
+export function takePendingProviderKey() {
+  const apiKey = sessionStorage.getItem(pendingKeyKey) ?? undefined;
+  sessionStorage.removeItem(pendingKeyKey);
+  return apiKey;
+}
+
+/** Hand a provider key to the connector. It is held in that process's memory only. */
+export async function setGatewayProviderKey(metadata: GatewayMetadata, token: string, provider: "gemini", apiKey: string) {
+  if (!metadata.apiBaseUrl) throw new Error("AI Gateway API URL is unavailable");
+  const response = await fetch(new URL(`providers/${provider}`, `${metadata.apiBaseUrl.replace(/\/$/, "")}/`), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ apiKey }),
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({}));
+    throw new Error(typeof detail.error === "string" ? detail.error : `Could not set the ${provider} key (${response.status})`);
+  }
+}
+
 export async function discoverCapabilities(metadata: GatewayMetadata, token?: string) {
   if (metadata.mock) return {
     capabilities: new Set<AiCapability>(["structured_output", "vision", "diagram_plan", "diagram_patch", "streaming"]),
@@ -73,9 +133,18 @@ export async function discoverCapabilities(metadata: GatewayMetadata, token?: st
 export class DirectGatewayConnector implements AiConnector {
   capabilities: Set<AiCapability>;
   providers: AiProvider[];
-  constructor(private metadata: GatewayMetadata, private token: string, discovered: Awaited<ReturnType<typeof discoverCapabilities>>) {
+  constructor(readonly metadata: GatewayMetadata, private token: string, discovered: Awaited<ReturnType<typeof discoverCapabilities>>) {
     this.capabilities = discovered.capabilities;
     this.providers = discovered.providers;
+  }
+
+  /** Add a provider key to the live connection, then pick the change up. */
+  async setProviderKey(provider: "gemini", apiKey: string) {
+    await setGatewayProviderKey(this.metadata, this.token, provider, apiKey);
+    const discovered = await discoverCapabilities(this.metadata, this.token);
+    this.capabilities = discovered.capabilities;
+    this.providers = discovered.providers;
+    return discovered.providers;
   }
 
   async generate(request: AiRequest, signal: AbortSignal, onProgress: (progress: AiProgress) => void) {
@@ -89,6 +158,12 @@ export class DirectGatewayConnector implements AiConnector {
     if (!response.ok) throw new Error(`AI Gateway request failed (${response.status})`);
     onProgress("Validating proposal");
     const body: unknown = await response.json();
+    // A generation that runs long has its headers sent before the outcome is
+    // known, so a failure arrives as a 200 carrying an error instead. Surface
+    // the gateway's own message rather than a schema complaint about it.
+    if (body && typeof body === "object" && "error" in body && typeof (body as { error: unknown }).error === "string") {
+      throw new Error((body as { error: string }).error);
+    }
     const correlated = body && typeof body === "object" ? { ...body, requestId: request.requestId } : body;
     return diagramProposalSchema.parse(correlated);
   }

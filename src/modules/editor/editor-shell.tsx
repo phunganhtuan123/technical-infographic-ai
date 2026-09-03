@@ -42,6 +42,16 @@ function numberFieldValue(raw: string, fallback: number, lower: number, upper: n
 
 // Narrowest the canvas column is allowed to become while a panel is dragged.
 const minimumCanvasWidth = 560;
+// The left panel shows one of these at a time. Four blocks stacked vertically
+// pushed the component list below the fold on a laptop, so the panel is an
+// accordion: the section you are working in is open, the rest are one row each.
+type LibrarySection = "workspaces" | "examples" | "components" | "providers";
+const librarySections: Array<{ id: LibrarySection; label: string }> = [
+  { id: "workspaces", label: "WORKSPACES" },
+  { id: "examples", label: "CHART EXAMPLES" },
+  { id: "components", label: "COMPONENTS" },
+  { id: "providers", label: "PROVIDERS & STACKS" },
+];
 const flowRoles = new Set<NodeRole>(["start", "process", "decision", "input-output", "end", "document", "subprocess", "manual-input", "preparation", "delay", "connector", "off-page", "merge", "stored-data"]);
 const structureRoles = new Set<NodeRole>(["zone", "group"]);
 const annotationRoles = new Set<NodeRole>(["text", "note"]);
@@ -152,7 +162,7 @@ export function EditorShell() {
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
   const [presenting, setPresenting] = useState(false);
   const [sceneTransition, setSceneTransition] = useState(false);
-  const [componentListCollapsed, setComponentListCollapsed] = useState(false);
+  const [librarySection, setLibrarySection] = useState<LibrarySection>("workspaces");
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set(["Technology"]));
   const [inspectorWidth, setInspectorWidth] = useState(280);
   const [aiState, setAiState] = useState<{ busy: boolean; message: string; source?: string }>({ busy: false, message: "Ready" });
@@ -161,7 +171,7 @@ export function EditorShell() {
   const [documentRevision, setDocumentRevision] = useState(0);
   const [storageReady, setStorageReady] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
-  const [accountOpen, setAccountOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState<"sign-in" | "register" | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const canvasRef = useRef<DiagramCanvasHandle>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -561,6 +571,16 @@ export function EditorShell() {
     ["Async", filteredPrimitives.filter((primitive) => !primitive.technology && primitive.lane === "async" && !flowRoles.has(primitive.role) && !structureRoles.has(primitive.role))],
     ["Data", filteredPrimitives.filter((primitive) => !primitive.technology && primitive.lane === "data" && !flowRoles.has(primitive.role) && !structureRoles.has(primitive.role))],
   ] as const;
+  // The header count is what the library holds, not what the current search
+  // leaves standing, so it does not flicker while a query is being typed.
+  const primitiveCount = primitiveDefinitions.length;
+
+  // Leaving the component section drops the query with it: a filter that is
+  // still narrowing the list from behind a closed section is a trap.
+  const showLibrarySection = (next: LibrarySection) => {
+    setLibrarySection(next);
+    if (next !== "components") setSearch("");
+  };
 
   return (
     <AiAssistantProvider document={document} revision={documentRevision} selectedNodeIds={selectedNodeIds} selectedEdgeIds={selectedEdgeIds} onAccept={acceptAiProposal}>
@@ -576,30 +596,78 @@ export function EditorShell() {
           <details className="export-menu"><summary>{exporting ? "Rendering…" : "Export"}</summary><div><button disabled={Boolean(exporting)} onClick={() => void exportSvg(document)}>SVG animated</button><button disabled={Boolean(exporting)} onClick={() => void exportPng(document)}>PNG 2× static</button><button disabled={Boolean(exporting)} onClick={() => void exportHtml(document)}>HTML animated</button><button disabled={Boolean(exporting)} onClick={() => void runAnimatedExport("gif")}>{exporting === "gif" ? "Rendering GIF…" : "GIF animated"}</button><button disabled={Boolean(exporting)} onClick={() => void runAnimatedExport("video")}>{exporting === "video" ? "Recording video…" : "Video WebM"}</button><button disabled={Boolean(exporting)} onClick={() => void exportWorkspaceJson(document)}>Workspace JSON</button></div></details>
           <button aria-label="Start presentation" className="present" disabled={document.nodes.length === 0} onClick={startPresenting} title="Present scenes (Esc to exit)">▶ Present</button>
           <button aria-label="Open configuration" onClick={() => setConfigOpen(true)}>Config</button>
-          <SyncBadge onOpen={() => setAccountOpen(true)} state={syncState} />
+          {session ? <SyncBadge onOpen={() => setAccountOpen("sign-in")} state={syncState} /> : null}
+          {session ? (
+            <button aria-label="Account" className="account-chip" onClick={() => setAccountOpen("sign-in")} title={session.user.email ?? session.user.displayName}>
+              <i aria-hidden="true">{(session.user.displayName || session.user.email || "?").slice(0, 1).toUpperCase()}</i>
+              <span>{session.user.displayName || session.user.email}</span>
+            </button>
+          ) : (
+            // Signed out, an account is the one thing the top bar is asking for,
+            // so it is a pair of real buttons rather than another grey one.
+            <div className="auth-actions">
+              <button className="auth-sign-in" onClick={() => setAccountOpen("sign-in")}>Sign in</button>
+              <button className="auth-sign-up" onClick={() => setAccountOpen("register")}>Sign up</button>
+            </div>
+          )}
         </div>
       </header>
 
       <section className="workspace">
         <aside className={`library-panel${libraryCollapsed ? " is-collapsed" : ""}`}>
-          <button aria-label={libraryCollapsed ? "Expand left panel" : "Collapse left panel"} className="library-collapse" onClick={() => animateLayout(() => setLibraryCollapsed((value) => !value))}>{libraryCollapsed ? "›" : "‹"}</button>
+          <button aria-label={libraryCollapsed ? "Expand left panel" : "Collapse left panel"} className="library-collapse" onClick={() => animateLayout(() => setLibraryCollapsed((value) => !value))}>{libraryCollapsed ? "\u203a" : "\u2039"}</button>
           <div aria-hidden="true" className="library-resizer" onPointerDown={(event) => startResize(event, "left")} />
-          <div className="panel-heading"><span>WORKSPACES</span><button aria-label="Create workspace" className="panel-add" onClick={createWorkspace}>＋</button></div>
-          <div className="workspace-list">{workspaces.map((workspace, index) => <button className={workspace.id === activeWorkspaceId ? "active" : ""} key={workspace.id} onClick={() => { setActiveWorkspaceId(workspace.id); setSelectedNodeIds([]); setSelectedEdgeIds([]); }}><i>{String(index + 1).padStart(2, "0")}</i><span>{workspace.workspaceTitle ?? workspace.title}</span><small>{workspace.scenes?.length ?? 1}</small></button>)}</div>
-          <div className="workspace-manager">
-            <label>ACTIVE WORKSPACE</label>
-            <input aria-label="Workspace name" value={document.workspaceTitle ?? document.title} onChange={(event) => updateWorkspace({ ...document, workspaceTitle: event.target.value })} />
-            <div><button onClick={duplicateWorkspace}>Duplicate</button><button onClick={() => setHistoryOpen(true)}>History</button><button className="danger" disabled={workspaces.length === 1} onClick={deleteWorkspace}>Delete</button></div>
+          <div className="library-accordion">
+            {librarySections.map((section) => {
+              const open = librarySection === section.id;
+              const count = section.id === "workspaces" ? workspaces.length
+                : section.id === "examples" ? diagramSamples.length
+                : section.id === "components" ? primitiveCount
+                : technologyOptions.length;
+              return (
+                <section className={`library-section${open ? " is-open" : ""}`} key={section.id}>
+                  <div className="library-section-head">
+                    <button aria-expanded={open} className="library-section-toggle" onClick={() => showLibrarySection(section.id)}>
+                      <i aria-hidden="true">{open ? "\u25be" : "\u25b8"}</i><span>{section.label}</span><b>{count}</b>
+                    </button>
+                    {section.id === "workspaces" ? <button aria-label="Create workspace" className="panel-add" onClick={createWorkspace}>＋</button> : null}
+                    {section.id === "components" && open ? (
+                      <div className="library-view-switch">
+                        <button aria-label="Tree component view" className={libraryView === "tree" ? "active" : ""} onClick={() => setLibraryView("tree")}>Tree</button>
+                        <button aria-label="Grid component view" className={libraryView === "grid" ? "active" : ""} onClick={() => setLibraryView("grid")}>Grid</button>
+                      </div>
+                    ) : null}
+                  </div>
+                  {open ? (
+                    <div className="library-section-body">
+                      {section.id === "workspaces" ? (
+                        <>
+                          <div className="workspace-list">{workspaces.map((workspace, index) => <button className={workspace.id === activeWorkspaceId ? "active" : ""} key={workspace.id} onClick={() => { setActiveWorkspaceId(workspace.id); setSelectedNodeIds([]); setSelectedEdgeIds([]); }}><i>{String(index + 1).padStart(2, "0")}</i><span>{workspace.workspaceTitle ?? workspace.title}</span><small>{workspace.scenes?.length ?? 1}</small></button>)}</div>
+                          <div className="workspace-manager">
+                            <label>ACTIVE WORKSPACE</label>
+                            <input aria-label="Workspace name" value={document.workspaceTitle ?? document.title} onChange={(event) => updateWorkspace({ ...document, workspaceTitle: event.target.value })} />
+                            <div><button onClick={duplicateWorkspace}>Duplicate</button><button onClick={() => setHistoryOpen(true)}>History</button><button className="danger" disabled={workspaces.length === 1} onClick={deleteWorkspace}>Delete</button></div>
+                          </div>
+                        </>
+                      ) : null}
+                      {section.id === "examples" ? (
+                        <div className="sample-library">{diagramSamples.map((sample) => <button key={sample.id} onClick={() => createSampleWorkspace(sample)}><i>{String(sample.number).padStart(2, "0")}</i><strong>{sample.label}</strong><small>{sample.description}</small></button>)}</div>
+                      ) : null}
+                      {section.id === "components" ? (
+                        <>
+                          <label className="search"><span>⌕</span><input aria-label="Search primitives" onChange={(event) => setSearch(event.target.value)} placeholder="Search technology" value={search} /></label>
+                          <div className={`primitive-tree primitive-tree--${libraryView}`}>{primitiveGroups.map(([group, primitives]) => primitives.length ? <details open={search.trim().length > 0 || !collapsedCategories.has(group)} key={group}><summary onClick={(event) => { event.preventDefault(); setCollapsedCategories((current) => { const next = new Set(current); if (next.has(group)) next.delete(group); else next.add(group); return next; }); }}><span>{group}</span><b>{primitives.length}</b></summary><div className={`primitive-list primitive-list--${libraryView}`}>{primitives.map(renderPrimitive)}</div></details> : null)}</div>
+                        </>
+                      ) : null}
+                      {section.id === "providers" ? (
+                        <div className="provider-block"><b>AWS</b><b>GCP</b><b>K8s</b><b>+{Math.max(0, technologyOptions.length - 3)}</b></div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </section>
+              );
+            })}
           </div>
-          <details className="sample-library" open>
-            <summary><span>CHART EXAMPLES</span><b>{diagramSamples.length}</b></summary>
-            <div>{diagramSamples.map((sample) => <button key={sample.id} onClick={() => createSampleWorkspace(sample)}><i>{String(sample.number).padStart(2, "0")}</i><strong>{sample.label}</strong><small>{sample.description}</small></button>)}</div>
-          </details>
-          <div className="library-divider" />
-          <div className="panel-heading"><span>COMPONENTS</span><div className="component-panel-actions"><button aria-label={componentListCollapsed ? "Expand component list" : "Collapse component list"} onClick={() => setComponentListCollapsed((value) => !value)}>{componentListCollapsed ? "Show" : "Hide"}</button><div className="library-view-switch"><button aria-label="Tree component view" className={libraryView === "tree" ? "active" : ""} onClick={() => setLibraryView("tree")}>Tree</button><button aria-label="Grid component view" className={libraryView === "grid" ? "active" : ""} onClick={() => setLibraryView("grid")}>Grid</button></div></div></div>
-          {!componentListCollapsed ? <><label className="search"><span>⌕</span><input aria-label="Search primitives" onChange={(event) => setSearch(event.target.value)} placeholder="Search technology" value={search} /></label>
-          <div className={`primitive-tree primitive-tree--${libraryView}`}>{primitiveGroups.map(([group, primitives]) => primitives.length ? <details open={search.trim().length > 0 || !collapsedCategories.has(group)} key={group}><summary onClick={(event) => { event.preventDefault(); setCollapsedCategories((current) => { const next = new Set(current); if (next.has(group)) next.delete(group); else next.add(group); return next; }); }}><span>{group}</span><b>{primitives.length}</b></summary><div className={`primitive-list primitive-list--${libraryView}`}>{primitives.map(renderPrimitive)}</div></details> : null)}</div></> : <div className="component-list-collapsed">Component library hidden</div>}
-          <div className="provider-block"><span>PROVIDERS & STACKS</span><div><b>AWS</b><b>GCP</b><b>K8s</b><b>+{Math.max(0, technologyOptions.length - 3)}</b></div></div>
         </aside>
 
         <section className="editor-main">
@@ -760,12 +828,13 @@ export function EditorShell() {
       ) : null}
       <AiConnectionSettings open={configOpen} onClose={() => setConfigOpen(false)} />
       <AccountDialog
-        onClose={() => setAccountOpen(false)}
+        initialMode={accountOpen ?? "sign-in"}
+        onClose={() => setAccountOpen(null)}
         onCreateAccount={createAccount}
         onSignIn={signIn}
         onSignOut={signOut}
         onSyncNow={syncNow}
-        open={accountOpen}
+        open={accountOpen !== null}
         session={session}
         state={syncState}
       />

@@ -14,6 +14,7 @@
 //           where the server supports it.
 //   claude  the `claude` CLI already logged in on this machine.
 //   codex   the `codex` CLI already logged in on this machine.
+//   gemini  a Google AI Studio key, held in memory only.
 //   api     an Anthropic API key. Only used when explicitly configured.
 //
 // Every backend that this machine can actually reach is offered at once, so the
@@ -27,6 +28,7 @@ import { join } from "node:path";
 
 const ANTHROPIC_API = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION = "2023-06-01";
+const GEMINI_API = "https://generativelanguage.googleapis.com/v1beta";
 
 // --------------------------------------------------------------------- utils
 
@@ -68,9 +70,9 @@ async function reachable(url, timeoutMs = 900) {
   }
 }
 
-function runCommand(command, args, { input, timeoutMs = 180_000 } = {}) {
+function runCommand(command, args, { input, timeoutMs = 180_000, cwd } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], cwd });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
@@ -90,6 +92,44 @@ function runCommand(command, args, { input, timeoutMs = 180_000 } = {}) {
     if (input !== undefined) child.stdin.end(input);
     else child.stdin.end();
   });
+}
+
+/** Read an NDJSON stream, concatenating whatever `pick` finds on each line. */
+async function collectNdjson(response, pick) {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let text = "";
+  for await (const chunk of response.body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try { text += pick(JSON.parse(line)) ?? ""; } catch { /* partial or non-JSON keepalive */ }
+    }
+  }
+  if (buffer.trim()) { try { text += pick(JSON.parse(buffer)) ?? ""; } catch { /* trailing noise */ } }
+  return text;
+}
+
+/** Read an SSE stream, concatenating whatever `pick` finds in each data frame. */
+async function collectSse(response, pick) {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let text = "";
+  for await (const chunk of response.body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const payload = trimmed.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      try { text += pick(JSON.parse(payload)) ?? ""; } catch { /* partial frame */ }
+    }
+  }
+  return text;
 }
 
 // ------------------------------------------------------------- local backend
@@ -120,12 +160,17 @@ function localBackend({ baseUrl, flavour, preferredModel }) {
     if (ollama) {
       // Ollama constrains decoding to the schema, which is the only reliable
       // way to keep a small model inside the diagram contract.
+      //
+      // Streamed, not because the tokens are shown anywhere, but because a
+      // non-streamed reply sends no headers until generation ends — and a large
+      // model can take longer than the 300s header timeout in Node's fetch. With
+      // streaming the headers land immediately and each token resets the clock.
       const response = await fetch(`${baseUrl}/api/chat`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           model,
-          stream: false,
+          stream: true,
           format: schema,
           options: { temperature: 0.3 },
           messages: [
@@ -135,8 +180,7 @@ function localBackend({ baseUrl, flavour, preferredModel }) {
         }),
       });
       if (!response.ok) throw new Error(`Ollama request failed (${response.status}): ${(await response.text()).slice(0, 300)}`);
-      const body = await response.json();
-      return extractJson(body.message?.content ?? "");
+      return extractJson(await collectNdjson(response, (event) => event.message?.content));
     }
 
     // LM Studio, llama.cpp and friends: OpenAI-compatible. Ask for a schema
@@ -149,7 +193,7 @@ function localBackend({ baseUrl, flavour, preferredModel }) {
     const attempt = async (responseFormat) => fetch(`${baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model, temperature: 0.3, messages, response_format: responseFormat }),
+      body: JSON.stringify({ model, temperature: 0.3, stream: true, messages, response_format: responseFormat }),
     });
 
     let response = await attempt({ type: "json_schema", json_schema: { name: schemaName, schema, strict: true } });
@@ -157,8 +201,9 @@ function localBackend({ baseUrl, flavour, preferredModel }) {
       response = await attempt({ type: "json_object" });
     }
     if (!response.ok) throw new Error(`Local model request failed (${response.status}): ${(await response.text()).slice(0, 300)}`);
-    const body = await response.json();
-    return extractJson(body.choices?.[0]?.message?.content ?? "");
+    // Same reason as Ollama above: streamed so headers arrive before the model
+    // has finished thinking. SSE frames rather than NDJSON here.
+    return extractJson(await collectSse(response, (event) => event.choices?.[0]?.delta?.content));
   }
 
   return {
@@ -173,12 +218,23 @@ function localBackend({ baseUrl, flavour, preferredModel }) {
 
 // --------------------------------------------------------------- cli backend
 
-function cliBackend({ command, version }) {
+function cliBackend({ command, version, preferredModel }) {
+  // Claude Code reads project instructions (CLAUDE.md, AGENTS.md) from its
+  // working directory. Diagram generation wants none of that context, and
+  // inheriting the connector's cwd would quietly bill every request for it, so
+  // each run happens in an empty scratch directory.
+  const scratch = mkdtemp(join(tmpdir(), "ti-claude-")).catch(() => undefined);
+
+  // The CLI accepts an alias or a full model id. Offer the aliases so the
+  // editor's model picker is useful; "default" means whatever the login prefers.
+  const aliases = ["default", "sonnet", "opus", "haiku"];
+
   async function listModels() {
-    return [version ? `claude-cli ${version}` : "claude-cli"];
+    const models = preferredModel && !aliases.includes(preferredModel) ? [preferredModel, ...aliases] : aliases;
+    return models.map((model) => model);
   }
 
-  async function complete({ system, userText, image, schema, schemaName }) {
+  async function complete({ system, userText, image, schema, schemaName, model }) {
     // Headless Claude Code has no structured-output switch, so the schema goes
     // in the prompt and the reply is parsed back out.
     const instructions = [
@@ -192,11 +248,14 @@ function cliBackend({ command, version }) {
       userText,
     ].join("\n");
 
+    const chosen = model && model !== "auto" && model !== "default" ? ["--model", model] : [];
+    const cwd = await scratch;
+
     let stdout;
     try {
-      stdout = await runCommand(command, ["-p", "--output-format", "json"], { input: instructions });
+      stdout = await runCommand(command, ["-p", "--output-format", "json", ...chosen], { input: instructions, cwd });
     } catch {
-      stdout = await runCommand(command, ["-p"], { input: instructions });
+      stdout = await runCommand(command, ["-p", ...chosen], { input: instructions, cwd });
     }
 
     // `--output-format json` wraps the answer; plain mode returns it directly.
@@ -213,14 +272,14 @@ function cliBackend({ command, version }) {
     return extractJson(text);
   }
 
-  return { id: "claude", providerId: "anthropic", label: "Claude CLI (this machine)", vision: false, listModels, complete };
+  return { id: "claude", providerId: "anthropic", label: version ? `Claude CLI ${version}` : "Claude CLI", vision: false, listModels, complete };
 }
 
 // ------------------------------------------------------------- codex backend
 
 function codexBackend({ command, version }) {
   async function listModels() {
-    return [version ? `codex-cli ${version}` : "codex-cli"];
+    return ["default"];
   }
 
   async function complete({ system, userText, image, schema, schemaName }) {
@@ -256,7 +315,72 @@ function codexBackend({ command, version }) {
     }
   }
 
-  return { id: "codex", providerId: "codex", label: "Codex CLI (this machine)", vision: false, listModels, complete };
+  return { id: "codex", providerId: "codex", label: version ? `Codex CLI ${version.replace(/^codex-cli\s*/, "")}`.trim() : "Codex CLI", vision: false, listModels, complete };
+}
+
+// ------------------------------------------------------------ gemini backend
+
+/**
+ * Gemini takes an OpenAPI subset, not full JSON Schema: `additionalProperties`
+ * and `$schema` make it reject the request outright. Everything the diagram
+ * schema actually relies on — type, enum, required, items, properties — survives.
+ */
+function toGeminiSchema(schema) {
+  if (Array.isArray(schema)) return schema.map(toGeminiSchema);
+  if (!schema || typeof schema !== "object") return schema;
+  const out = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (key === "additionalProperties" || key === "$schema") continue;
+    out[key] = toGeminiSchema(value);
+  }
+  return out;
+}
+
+function geminiBackend({ apiKey, preferredModel }) {
+  async function listModels() {
+    try {
+      const response = await fetch(`${GEMINI_API}/models?key=${encodeURIComponent(apiKey)}&pageSize=100`);
+      if (response.ok) {
+        const body = await response.json();
+        const models = (body.models ?? [])
+          .filter((model) => (model.supportedGenerationMethods ?? []).includes("generateContent"))
+          .map((model) => String(model.name ?? "").replace(/^models\//, ""))
+          .filter((name) => name.startsWith("gemini"));
+        if (models.length) return models;
+      }
+    } catch {
+      // fall through to whatever was configured
+    }
+    return preferredModel ? [preferredModel] : ["gemini-2.5-flash"];
+  }
+
+  async function complete({ system, userText, image, schema, model }) {
+    const picture = splitDataUrl(image?.dataUrl);
+    const parts = [];
+    if (picture) parts.push({ inline_data: { mime_type: picture.mediaType, data: picture.data } });
+    parts.push({ text: userText });
+
+    const target = model && model !== "auto" ? model : preferredModel ?? "gemini-2.5-flash";
+    const response = await fetch(`${GEMINI_API}/models/${encodeURIComponent(target)}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: "user", parts }],
+        generationConfig: { responseMimeType: "application/json", responseSchema: toGeminiSchema(schema), temperature: 0.2 },
+      }),
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`Gemini request failed (${response.status}): ${detail.slice(0, 300)}`);
+    }
+    const body = await response.json();
+    const text = (body.candidates?.[0]?.content?.parts ?? []).map((part) => part.text ?? "").join("");
+    if (!text.trim()) throw new Error("Gemini returned no content");
+    return extractJson(text);
+  }
+
+  return { id: "gemini", providerId: "gemini", label: "Gemini (API key)", vision: true, listModels, complete };
 }
 
 // --------------------------------------------------------------- api backend
@@ -315,6 +439,18 @@ function apiBackend({ apiKey, preferredModel }) {
   return { id: "api", providerId: "anthropic", label: "Claude (API key)", vision: true, listModels, complete };
 }
 
+/** Confirm a Gemini key actually authenticates before it is accepted. */
+export async function validateGeminiKey(apiKey) {
+  const response = await fetch(`${GEMINI_API}/models?key=${encodeURIComponent(apiKey)}&pageSize=1`, {
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (response.ok) return true;
+  const detail = await response.text().catch(() => "");
+  throw new Error(response.status === 400 || response.status === 403
+    ? "That Gemini key was rejected by Google."
+    : `Gemini key check failed (${response.status}): ${detail.slice(0, 200)}`);
+}
+
 // ----------------------------------------------------------------- detection
 
 async function detectLocal(baseUrl) {
@@ -340,8 +476,13 @@ async function detectCli(command) {
  * `wanted` narrows the set — "local", "claude", "codex", "api", or several
  * separated by commas. Two backends never share a provider id; the earlier one
  * wins, so a live `claude` CLI takes precedence over an API key.
+ *
+ * When `wanted` is given, its order is the preference order, because the first
+ * backend is what "Auto" resolves to. `claude,local` therefore means "Claude
+ * CLI by default, Ollama still offered in the picker" — the opposite of the
+ * built-in order, and not something the caller should have to accept.
  */
-export async function discoverBackends({ wanted, baseUrl, cliCommand, codexCommand, apiKey, preferredModel }) {
+export async function discoverBackends({ wanted, baseUrl, cliCommand, codexCommand, apiKey, geminiKey, preferredModel }) {
   const only = (wanted ?? "").split(",").map((value) => value.trim()).filter(Boolean);
   const allow = (id) => only.length === 0 || only.includes(id);
   const found = [];
@@ -355,7 +496,7 @@ export async function discoverBackends({ wanted, baseUrl, cliCommand, codexComma
 
   if (allow("claude")) {
     const version = await detectCli(cliCommand);
-    if (version) found.push(cliBackend({ command: cliCommand, version }));
+    if (version) found.push(cliBackend({ command: cliCommand, version, preferredModel }));
     else tried.push(`\`${cliCommand}\` on PATH`);
   }
 
@@ -365,10 +506,17 @@ export async function discoverBackends({ wanted, baseUrl, cliCommand, codexComma
     else tried.push(`\`${codexCommand}\` on PATH`);
   }
 
+  if (allow("gemini")) {
+    if (geminiKey) found.push(geminiBackend({ apiKey: geminiKey, preferredModel }));
+    else tried.push("GEMINI_API_KEY");
+  }
+
   if (allow("api")) {
     if (apiKey) found.push(apiBackend({ apiKey, preferredModel }));
     else tried.push("ANTHROPIC_API_KEY");
   }
+
+  if (only.length) found.sort((left, right) => only.indexOf(left.id) - only.indexOf(right.id));
 
   const seen = new Set();
   const backends = found.filter((backend) => {

@@ -43,6 +43,9 @@ export function SyncBadge({ state, onOpen }: { state: SyncState; onOpen: () => v
 
 type AccountDialogProps = {
   open: boolean;
+  // Which half the top bar asked for. Reapplied on each open so "Sign up"
+  // lands on the register form even after a previous visit left sign-in showing.
+  initialMode?: "sign-in" | "register";
   session: Session | null;
   state: SyncState;
   onClose: () => void;
@@ -54,6 +57,7 @@ type AccountDialogProps = {
 
 export function AccountDialog({
   open,
+  initialMode = "sign-in",
   session,
   state,
   onClose,
@@ -62,7 +66,7 @@ export function AccountDialog({
   onSignOut,
   onSyncNow,
 }: AccountDialogProps) {
-  const [mode, setMode] = useState<"sign-in" | "register">("sign-in");
+  const [mode, setMode] = useState<"sign-in" | "register">(initialMode);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -71,13 +75,14 @@ export function AccountDialog({
 
   useEffect(() => {
     if (!open) return;
+    setMode(initialMode);
     setError(null);
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose, open]);
+  }, [initialMode, onClose, open]);
 
   // A successful sign-in changes the session underneath this dialog; clearing
   // the password field means it is not sitting in the DOM afterwards.
@@ -197,6 +202,26 @@ export function AccountDialog({
           </>
         ) : (
           <>
+            <div aria-label="Sign in or create an account" className="account-tabs" role="tablist">
+              <button
+                aria-selected={mode === "sign-in"}
+                className={mode === "sign-in" ? "active" : ""}
+                onClick={() => { setMode("sign-in"); setError(null); }}
+                role="tab"
+                type="button"
+              >
+                Sign in
+              </button>
+              <button
+                aria-selected={mode === "register"}
+                className={mode === "register" ? "active" : ""}
+                onClick={() => { setMode("register"); setError(null); }}
+                role="tab"
+                type="button"
+              >
+                Sign up
+              </button>
+            </div>
             <form className="account-form" onSubmit={submit}>
               {mode === "register" ? (
                 <label>
@@ -238,19 +263,10 @@ export function AccountDialog({
               </button>
             </form>
             <p className="account-note">
-              Signing in copies your workspaces to the server so they open on another machine. Without an account the
-              editor is unchanged — everything stays in this browser.
+              {mode === "register"
+                ? "An account copies your workspaces to the server so they open on another machine. Everything already in this browser is kept and uploaded on the first sync."
+                : "Signing in copies your workspaces to the server so they open on another machine. Without an account the editor is unchanged — everything stays in this browser."}
             </p>
-            <button
-              className="account-switch"
-              onClick={() => {
-                setMode(mode === "register" ? "sign-in" : "register");
-                setError(null);
-              }}
-              type="button"
-            >
-              {mode === "register" ? "I already have an account" : "Create an account instead"}
-            </button>
           </>
         )}
       </section>

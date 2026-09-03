@@ -16,7 +16,7 @@
 
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
-import { discoverBackends } from "./backends.mjs";
+import { discoverBackends, validateGeminiKey } from "./backends.mjs";
 
 // Flags win over environment, so `npx ... --editor https://…` needs no setup.
 const flags = new Map();
@@ -28,9 +28,24 @@ for (let index = 2; index < process.argv.length; index += 1) {
 }
 const option = (name, environment, fallback) => flags.get(name) ?? process.env[environment]?.trim() ?? fallback;
 
-const HOST = "127.0.0.1";
+// Loopback by default: the connector fronts a CLI that is already logged in, so
+// anything that can reach this port can spend that login. It only binds wider
+// when told to, which is what a server-side deployment needs — the CLI lives on
+// the server and the browsers are elsewhere on the LAN.
+const HOST = option("host", "AI_CONNECTOR_HOST", "127.0.0.1");
 const PORT = Number(flags.get("port") ?? process.env.AI_CONNECTOR_PORT ?? 47821);
-const ORIGIN = `http://${HOST}:${PORT}`;
+const LOOPBACK_ONLY = HOST === "127.0.0.1" || HOST === "::1" || HOST === "localhost";
+// What the connector calls itself in the discovery document. When it is bound
+// wider, the browser has to be handed an address it can actually resolve, not
+// its own loopback.
+// May include a path, e.g. https://editor.example.com/ai-connector, for the
+// case where a reverse proxy mounts the connector under the editor's own
+// origin. Endpoints are advertised relative to it, so the browser is always
+// handed an address it can actually reach.
+const ORIGIN = (option("public-origin", "AI_CONNECTOR_PUBLIC_ORIGIN", "") || `http://${LOOPBACK_ONLY ? "127.0.0.1" : HOST}:${PORT}`).replace(/\/$/, "");
+// Requests arrive with the prefix already stripped by the proxy, so routing
+// still works off bare paths; only what is advertised carries the prefix.
+const ROUTE_BASE = `http://${LOOPBACK_ONLY ? "127.0.0.1" : HOST}:${PORT}`;
 const CLIENT_ID = "technical-infographic-web";
 const SCOPES = ["openid", "profile", "diagram.generate"];
 const TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
@@ -42,6 +57,9 @@ const localBaseUrl = option("base-url", "AI_BASE_URL", "http://127.0.0.1:11434")
 const cliCommand = option("claude-cli", "CLAUDE_CLI", "claude");
 const codexCommand = option("codex-cli", "CODEX_CLI", "codex");
 const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+// Held in memory only, and settable at runtime from the editor so a key never
+// has to be written to disk to try it. It is not echoed back anywhere.
+let geminiKey = option("gemini-key", "GEMINI_API_KEY", "") || undefined;
 const preferredModel = option("model", "AI_MODEL", process.env.ANTHROPIC_MODEL?.trim());
 
 // Which editor may pair with this connector. A page served from this machine is
@@ -59,6 +77,38 @@ const editorOrigins = (option("editor", "EDITOR_ORIGIN", "") ?? "")
 function allowedEditorOrigin(origin) {
   if (!origin) return false;
   return localOrigin.test(origin) || editorOrigins.includes(origin);
+}
+
+// Origin checks are enforced by browsers, not by the network, so they do nothing
+// against a direct request. Once this connector is bound past loopback the
+// address of the caller is the only thing left to check, and the pairing flow
+// hands out a token to anyone who can complete it. Default to the private
+// ranges; --allow-ip narrows it further.
+const allowedClients = (option("allow-ip", "AI_CONNECTOR_ALLOW_IPS", "") ?? "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+
+function isPrivateAddress(address) {
+  if (address === "::1" || address === "127.0.0.1") return true;
+  const parts = address.split(".");
+  if (parts.length !== 4 || !parts.every((part) => /^\d{1,3}$/.test(part))) return false;
+  const [a, b] = parts.map(Number);
+  return a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254);
+}
+
+function clientAddress(request) {
+  // No proxy is trusted here: the connector is meant to be reached directly, so
+  // a forwarded header would only let a caller name itself.
+  return (request.socket.remoteAddress ?? "").replace(/^::ffff:/, "");
+}
+
+function allowedClient(request) {
+  const address = clientAddress(request);
+  if (address === "127.0.0.1" || address === "::1") return true;
+  if (LOOPBACK_ONLY) return false;
+  if (allowedClients.length) return allowedClients.some((prefix) => address === prefix || address.startsWith(prefix.replace(/\*$/, "")));
+  return isPrivateAddress(address);
 }
 
 /** @type {Map<string, { challenge: string, redirectUri: string, expiresAt: number }>} */
@@ -420,8 +470,13 @@ async function route(request, response, url) {
       policyVersion: "1",
       mock: false,
       // Not part of the contract, and ignored by the schema. It lets the Config
-      // dialog show which Local buttons will actually work before anyone pairs.
+      // dialog show which buttons will actually work, and which models each one
+      // offers, before anyone pairs.
       backends: backends.map((backend) => backend.providerId),
+      backendDetails: await Promise.all(backends.map(async (backend) => {
+        const { models, defaultModel } = await modelsFor(backend);
+        return { id: backend.providerId, label: backend.label, models, defaultModel, vision: backend.vision };
+      })),
     });
   }
 
@@ -490,6 +545,35 @@ async function route(request, response, url) {
     return sendJson(request, response, 200, { capabilities, providers });
   }
 
+  // Adding a provider key from the editor. Requires an existing pairing, so a
+  // caller that has not been through the approval page cannot reconfigure the
+  // connector. The key stays in this process; it is never written to disk and
+  // never returned.
+  if (request.method === "POST" && url.pathname === "/v1/providers/gemini") {
+    const body = await readJsonBody(request);
+    const key = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+    if (key) {
+      try { await validateGeminiKey(key); }
+      catch (error) { return sendJson(request, response, 400, { error: error.message }); }
+    }
+    const previous = geminiKey;
+    geminiKey = key || undefined;
+    try {
+      await refreshBackends();
+    } catch (error) {
+      geminiKey = previous;
+      await refreshBackends().catch(() => undefined);
+      return sendJson(request, response, 400, { error: error.message });
+    }
+    if (key && !backends.some((backend) => backend.providerId === "gemini")) {
+      geminiKey = previous;
+      await refreshBackends().catch(() => undefined);
+      return sendJson(request, response, 400, { error: `Gemini is not in AI_BACKEND (currently ${wantedBackend ?? "all"})` });
+    }
+    console.log(`[connector] gemini key ${key ? "set" : "cleared"}`);
+    return sendJson(request, response, 200, { providers: backends.map((backend) => backend.providerId) });
+  }
+
   if (request.method === "POST" && url.pathname === "/v1/responses") {
     const body = await readJsonBody(request);
     const input = body.input ?? {};
@@ -497,13 +581,32 @@ async function route(request, response, url) {
       return sendJson(request, response, 400, { error: "prompt is required" });
     }
     const started = Date.now();
+
+    // Generation can outlast every timeout between here and the browser: a
+    // reverse proxy waiting on the first byte, Node's fetch waiting on headers,
+    // a CDN waiting on the origin. All of them are satisfied by bytes, so the
+    // headers go out now and a newline follows every few seconds until the
+    // answer is ready. Leading whitespace is legal JSON, so the client still
+    // just parses the body — no streaming code needed on the other side.
+    response.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      ...corsHeaders(request),
+    });
+    const heartbeat = setInterval(() => {
+      if (!response.writableEnded) response.write("\n");
+    }, 5000);
+
     try {
       const { backendId, ...proposal } = await generateProposal(input);
       console.log(`[connector] ${backendId} · ${input.intent} · ${proposal.patches.length} patch(es) · ${Date.now() - started}ms`);
-      return sendJson(request, response, 200, proposal);
+      clearInterval(heartbeat);
+      return response.end(JSON.stringify(proposal));
     } catch (error) {
-      console.error("[connector] generation failed:", error.message);
-      return sendJson(request, response, 502, { error: error.message });
+      console.error(`[connector] generation failed after ${Date.now() - started}ms:`, error.message);
+      clearInterval(heartbeat);
+      // The status line is long gone, so the failure has to travel in the body.
+      return response.end(JSON.stringify({ error: error.message }));
     }
   }
 
@@ -512,15 +615,22 @@ async function route(request, response, url) {
 
 // ---------------------------------------------------------------------- boot
 
-try {
+async function refreshBackends() {
   backends = await discoverBackends({
     wanted: wantedBackend,
     baseUrl: localBaseUrl,
     cliCommand,
     codexCommand,
     apiKey,
+    geminiKey,
     preferredModel,
   });
+  modelCache.clear();
+  return backends;
+}
+
+try {
+  await refreshBackends();
 } catch (error) {
   console.error([
     "",
@@ -547,7 +657,13 @@ try {
 
 const server = createServer((request, response) => {
   sweep();
-  const url = new URL(request.url ?? "/", ORIGIN);
+  const url = new URL(request.url ?? "/", ROUTE_BASE);
+
+  if (!allowedClient(request)) {
+    console.warn(`[connector] refused ${clientAddress(request)} — not an allowed client address`);
+    response.writeHead(403, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+    return response.end(JSON.stringify({ error: "forbidden" }));
+  }
 
   if (request.method === "OPTIONS") {
     response.writeHead(204, corsHeaders(request));
@@ -568,15 +684,20 @@ server.listen(PORT, HOST, async () => {
   }));
   console.log([
     "",
-    `  Local AI Connector listening on ${ORIGIN}`,
+    `  Local AI Connector bound to ${HOST}:${PORT}, advertising ${ORIGIN}`,
     "",
     "  Available here:",
     ...lines,
     "",
     `  Editors: this machine${editorOrigins.length ? `, ${editorOrigins.join(", ")}` : " only — pass --editor https://… for a deployed editor"}`,
+    `  Callers: ${LOOPBACK_ONLY ? "this machine only (loopback bind)" : allowedClients.length ? allowedClients.join(", ") : "private network addresses only"}`,
     "",
-    "  Bound to the loopback interface only. The browser receives an opaque",
-    "  token that expires in 8 hours and never sees any credential.",
+    LOOPBACK_ONLY
+      ? "  Bound to the loopback interface only. The browser receives an opaque"
+      : "  NOT loopback-only. Anyone who can reach this port and complete the",
+    LOOPBACK_ONLY
+      ? "  token that expires in 8 hours and never sees any credential."
+      : "  pairing can spend the CLI login behind it — keep the port firewalled.",
     "",
     "  Next: open the editor, then Config → AI connections.",
     "",
