@@ -53,3 +53,34 @@ export function exportBounds(document: DiagramDocument): ExportBounds {
   }
   return { minX, minY, width, height };
 }
+
+/**
+ * The frame whose shape best matches what was actually drawn.
+ *
+ * "Auto" used to mean "keep whatever the workspace already had", which for a
+ * new workspace is 16:9 — so a tall flowchart was fitted into a wide frame by
+ * growing the frame sideways, and twenty boxes ended up as a thin ribbon down
+ * the middle of a mostly empty 3,925px canvas. Choosing by the content's own
+ * aspect ratio is what the label promises.
+ */
+export function bestFitFormat(document: DiagramDocument): DiagramDocument["format"] {
+  if (document.nodes.length === 0) return "16:9";
+  const minX = Math.min(...document.nodes.map((node) => node.position.x));
+  const minY = Math.min(...document.nodes.map((node) => node.position.y));
+  const maxX = Math.max(...document.nodes.map((node) => node.position.x + (node.size?.width ?? nodeWidth)));
+  const maxY = Math.max(...document.nodes.map((node) => node.position.y + (node.size?.height ?? nodeHeight)));
+  const width = Math.max(1, maxX - minX);
+  const height = Math.max(1, maxY - minY);
+  const aspect = width / height;
+
+  const candidates: Array<[DiagramDocument["format"], number]> = [
+    ["9:16", 720 / 1280],
+    ["4:5", 960 / 1200],
+    ["1:1", 1],
+    ["16:9", 1280 / 720],
+  ];
+  // Compare in log space so "twice as tall" and "twice as wide" are the same
+  // distance from square.
+  return candidates.reduce((best, candidate) =>
+    Math.abs(Math.log(aspect / candidate[1])) < Math.abs(Math.log(aspect / best[1])) ? candidate : best)[0];
+}

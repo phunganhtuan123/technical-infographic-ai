@@ -9,7 +9,9 @@ import { rememberGatewayOrigin } from "@/modules/projects/user-settings";
 import { DirectGatewayConnector, MockGatewayConnector, clearClientGatewayUrl, discoverCapabilities, discoverClientGateway, saveClientGatewayUrl, savePendingModel, savePendingProvider, savePendingProviderKey, savedClientGatewayUrl, takePendingModel, takePendingProvider, takePendingProviderKey, type AiConnector, type AiProgress } from "./gateway";
 import { completePkceAuthorization, beginPkceAuthorization } from "./pkce";
 import { sanitizeDiagramImage } from "./image-input";
-import { createThread, loadThread, saveThread, threadContext, updateThreadProposalStatus, type AiThread } from "./thread-store";
+import { bestFitFormat } from "@/modules/diagram/bounds";
+import { BUBBLE_SIZE, bubbleWidth, panelPlacement, useChatBubble } from "./chat-bubble";
+import { createSession, createThread, deleteThread, listSessions, loadThread, saveThread, sessionTitle, threadContext, updateThreadProposalStatus, type AiThread } from "./thread-store";
 import { BrowserKeyConnector, activeDirectProvider, clearDirectKey, saveDirectKey, savedDirectKey, validateDirectKey, type DirectProviderId } from "./direct-providers";
 import type { AiIntent, AiProvider, DiagramProposal } from "./contracts";
 
@@ -40,6 +42,9 @@ type AssistantContextValue = {
   send(input: AiSendInput): Promise<DiagramProposal | undefined>;
   sendSession(input: Omit<AiSendInput, "thread">): Promise<DiagramProposal | undefined>;
   clearSession(): void;
+  sessions: AiThread[];
+  openSession(id: string): void;
+  removeSession(id: string): void;
 };
 
 const AssistantContext = createContext<AssistantContextValue | null>(null);
@@ -95,17 +100,42 @@ export function AiAssistantProvider({ children, document, revision, selectedNode
   const [session, setSession] = useState<AiThread>();
   const controllerRef = useRef<AbortController | undefined>(undefined);
   const requestFailureRef = useRef<string | undefined>(undefined);
+  const [sessions, setSessions] = useState<AiThread[]>([]);
   const documentRef = useRef(document);
   documentRef.current = document;
 
   useEffect(() => {
     let active = true;
     setProposal(undefined);
-    void loadThread(document.id, ["workspace"]).then((stored) => {
-      if (active) setSession(stored ?? createThread(document.id, ["workspace"], "workspace"));
-    });
+    // Every past conversation for this workspace, newest first. The one that
+    // opens is the newest; the rest stay available in the session list.
+    void (async () => {
+      const stored = await listSessions(document.id);
+      // Conversations saved before sessions were separate live under the old
+      // single id; fold that one in so nothing is orphaned.
+      const legacy = await loadThread(document.id, ["workspace"]);
+      const all = legacy && !stored.some((thread) => thread.id === legacy.id) ? [legacy, ...stored] : stored;
+      if (!active) return;
+      setSessions(all);
+      setSession(all[0] ?? createSession(document.id));
+    })();
     return () => { active = false; };
   }, [document.id]);
+
+  // The list is what the session picker renders, so the open conversation has to
+  // keep its entry in sync as it grows — otherwise its label and timestamp are
+  // whatever they were when it was opened.
+  useEffect(() => {
+    if (!session) return;
+    setSessions((current) => {
+      const index = current.findIndex((thread) => thread.id === session.id);
+      if (index === -1) return [session, ...current];
+      if (current[index] === session) return current;
+      const next = [...current];
+      next[index] = session;
+      return next;
+    });
+  }, [session]);
 
   useEffect(() => {
     if (!proposal) return;
@@ -170,7 +200,7 @@ export function AiAssistantProvider({ children, document, revision, selectedNode
         setStatus("Development AI connected");
         return;
       }
-      const connectionLabel = preferredProvider === "codex" ? "Codex Local" : preferredProvider === "anthropic" ? "Claude Local" : preferredProvider === "local" ? "Local Model" : preferredProvider === "gemini" ? "Gemini" : "Organization Gateway";
+      const connectionLabel = preferredProvider === "local" ? "Infographic AI" : preferredProvider === "gemini" ? "Gemini" : preferredProvider === "codex" ? "Codex" : preferredProvider === "anthropic" ? "Claude" : "Organization Gateway";
       setStatus(`Discovering ${connectionLabel}`);
       const discoveredGateway = await discoverClientGateway(gatewayUrl);
       const nextMetadata = discoveredGateway.metadata;
@@ -307,7 +337,13 @@ export function AiAssistantProvider({ children, document, revision, selectedNode
       setActivity((current) => ({ startedAt: current?.startedAt ?? Date.now(), phase: "building", detail: "Drawing nodes and paths on the canvas" }));
       const requestedFormat = format === "auto" ? workingDocument.format : format as DiagramDocument["format"];
       const baseDocument = { ...workingDocument, format: requestedFormat };
-      const appliedDocument = await buildProposalDocument(baseDocument, raw);
+      const built = await buildProposalDocument(baseDocument, raw);
+      // "Auto" means the frame follows the drawing. Left as the workspace
+      // default, a tall flowchart was fitted to 16:9 by widening the canvas
+      // until the diagram was a ribbon down the middle of it.
+      const appliedDocument = format === "auto"
+        ? { ...built, format: bestFitFormat(built) }
+        : built;
       const previewDocument = decorateProposalDocument(workingDocument, appliedDocument, raw);
       const frames = createProposalRevealFrames(previewDocument);
       const activeNodeTotal = previewDocument.nodes.filter((node) => node.previewStatus !== "deleted").length;
@@ -375,11 +411,31 @@ export function AiAssistantProvider({ children, document, revision, selectedNode
   }, [send, session]);
 
   const clearSession = useCallback(() => {
-    const next = createThread(documentRef.current.id, ["workspace"], "workspace");
+    // A new conversation is a new record. The previous one keeps its own id and
+    // stays in the list, which is what makes it readable again later.
+    const next = createSession(documentRef.current.id);
     setSession(next);
+    setSessions((current) => [next, ...current]);
     setProposal(undefined);
     void saveThread(next);
     setStatus("New AI session started");
+  }, []);
+
+  const openSession = useCallback((id: string) => {
+    setSessions((current) => {
+      const found = current.find((thread) => thread.id === id);
+      if (found) { setSession(found); setProposal(undefined); }
+      return current;
+    });
+  }, []);
+
+  const removeSession = useCallback((id: string) => {
+    void deleteThread(id);
+    setSessions((current) => {
+      const left = current.filter((thread) => thread.id !== id);
+      setSession((active) => active?.id === id ? left[0] ?? createSession(documentRef.current.id) : active);
+      return left;
+    });
   }, []);
 
   const accept = useCallback(async () => {
@@ -413,8 +469,26 @@ export function AiAssistantProvider({ children, document, revision, selectedNode
     setProviderId(nextProviderId);
     setModel(nextProviderId === "auto" ? "" : connector?.providers.find((provider) => provider.id === nextProviderId)?.defaultModel ?? "");
   }, [connector]);
-  const value = useMemo<AssistantContextValue>(() => ({ connected: Boolean(connector), busy, status, activity, providers: connector?.providers ?? [], providerId, model, gatewayOrigin, proposal, session, connect, connectWithKey, disconnect, forgetGateway, cancel, reject, addProviderKey, selectProvider, selectModel: setModel, accept, send, sendSession, clearSession }), [accept, activity, addProviderKey, busy, cancel, clearSession, connect, connectWithKey, connector, disconnect, forgetGateway, gatewayOrigin, model, proposal, providerId, providersRevision, reject, selectProvider, send, sendSession, session, status]);
+  const value = useMemo<AssistantContextValue>(() => ({ connected: Boolean(connector), busy, status, activity, providers: connector?.providers ?? [], providerId, model, gatewayOrigin, proposal, session, connect, connectWithKey, disconnect, forgetGateway, cancel, reject, addProviderKey, selectProvider, selectModel: setModel, accept, send, sendSession, clearSession, sessions, openSession, removeSession }), [accept, activity, addProviderKey, busy, cancel, clearSession, connect, connectWithKey, connector, disconnect, forgetGateway, gatewayOrigin, model, proposal, providerId, providersRevision, reject, selectProvider, send, sendSession, session, sessions, openSession, removeSession, status]);
   return <AssistantContext.Provider value={value}>{children}</AssistantContext.Provider>;
+}
+
+export const aiSessionToggleEvent = "technical-infographic:toggle-ai-session";
+export const aiSettingsOpenEvent = "technical-infographic:open-ai-settings";
+const chatSeenKey = "technical-infographic:chat-seen";
+
+/**
+ * Why the send button cannot be used, in words, or undefined when it can.
+ *
+ * The button used to just sit there disabled. The most common reason by far is
+ * that no gateway is connected yet, which is invisible from the panel — so it
+ * reads as a broken button rather than a missing step.
+ */
+export function sendBlockedReason(connected: boolean, busy: boolean, prompt: string) {
+  if (!connected) return "Connect an AI gateway first";
+  if (busy) return "The AI is still working on the last request";
+  if (prompt.trim().length < 2) return "Type what you want changed";
+  return undefined;
 }
 
 const modes = ["auto", "architecture", "flow", "sequence", "data-pipeline", "event-driven", "agent-loop", "infrastructure", "comparison", "explainer-grid"];
@@ -454,6 +528,53 @@ export function GlobalAiComposer({ hasNodes, currentFormat }: { hasNodes: boolea
   const [detailLevel, setDetailLevel] = useState("balanced");
   const [mustInclude, setMustInclude] = useState("");
   const [sessionOpen, setSessionOpen] = useState(false);
+
+  useEffect(() => {
+    const toggle = () => setSessionOpen((value) => !value);
+    window.addEventListener(aiSessionToggleEvent, toggle);
+    return () => window.removeEventListener(aiSessionToggleEvent, toggle);
+  }, []);
+
+  // The launcher nudges for attention until it has been opened once. After
+  // that it stays put: a control that keeps pulsing at someone who already
+  // knows what it is stops being a hint and becomes noise.
+  const [everOpened, setEverOpened] = useState(true);
+  useEffect(() => {
+    try { setEverOpened(window.localStorage.getItem(chatSeenKey) === "1"); } catch { setEverOpened(true); }
+  }, []);
+  const launcherWidth = bubbleWidth(sessionOpen);
+  const bubble = useChatBubble(useCallback(() => {
+    setSessionOpen((value) => {
+      if (!value) {
+        setEverOpened(true);
+        try { window.localStorage.setItem(chatSeenKey, "1"); } catch { /* storage blocked */ }
+      }
+      return !value;
+    });
+  }, []), launcherWidth);
+  const [viewport, setViewport] = useState({ width: 1600, height: 900 });
+  useEffect(() => {
+    const read = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
+    read();
+    window.addEventListener("resize", read);
+    return () => window.removeEventListener("resize", read);
+  }, []);
+  // The panel is measured rather than assumed: its height depends on how many
+  // past conversations the picker is showing.
+  const panelRef = useRef<HTMLElement>(null);
+  const [panelHeight, setPanelHeight] = useState(480);
+  useEffect(() => {
+    if (!sessionOpen) return;
+    const measure = () => {
+      const height = panelRef.current?.offsetHeight;
+      if (height) setPanelHeight(height);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    if (panelRef.current) observer.observe(panelRef.current);
+    return () => observer.disconnect();
+  }, [sessionOpen, ai.session?.id, ai.sessions.length]);
+  const placement = panelPlacement(bubble.position, viewport, panelHeight, launcherWidth);
   const fileRef = useRef<HTMLInputElement>(null);
   const sessionEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => { if (!intentLocked) setIntent(hasNodes ? "modify-current" : "new-scene"); }, [hasNodes, intentLocked]);
@@ -482,6 +603,19 @@ export function GlobalAiComposer({ hasNodes, currentFormat }: { hasNodes: boolea
     if (ai.session?.entries.length) submit(false);
     else setClarificationOpen(true);
   };
+  /**
+   * Send from the conversation panel.
+   *
+   * The composer's button opens the clarification sheet first when a session is
+   * empty, which is right for "Generate" in the top bar — a blank canvas is
+   * worth a couple of questions. In a chat panel it reads as the button doing
+   * nothing: you type a message, press Send, and a form appears instead. Here
+   * the message is simply sent.
+   */
+  const sendChatMessage = () => {
+    if (!prompt.trim()) return;
+    submit(false);
+  };
   const selectedProvider = ai.providers.find((provider) => provider.id === ai.providerId);
   return <div className="ai-composer" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); attachFile(event.dataTransfer.files[0]); }} onPaste={(event) => attachFile([...event.clipboardData.files].find((file) => file.type.startsWith("image/")))}>
     <div className="ai-composer-head"><span>AI COPILOT</span><div><div className="ai-connection">{ai.connected ? <><i />{selectedProvider?.label ?? "Client AI"}</> : <span>Configure AI in Settings</span>}</div><button className={sessionOpen ? "ai-session-toggle active" : "ai-session-toggle"} onClick={() => setSessionOpen((value) => !value)}>Session · {ai.session?.entries.length ?? 0}</button></div></div>
@@ -494,13 +628,64 @@ export function GlobalAiComposer({ hasNodes, currentFormat }: { hasNodes: boolea
       <button className={image ? "has-image" : ""} onClick={() => fileRef.current?.click()}>{image ? `${image.width}×${image.height}` : "＋ Image"}</button>
       <input ref={fileRef} hidden type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { attachFile(event.target.files?.[0]); event.currentTarget.value = ""; }} />
     </div>
-    <div className="ai-composer-input"><input aria-label="AI diagram instruction" placeholder={ai.session?.entries.length ? "Continue: move MFA below Auth Service…" : "Describe the technical chart you want to create…"} value={prompt} onChange={(event) => updatePrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && ai.connected && !ai.busy) requestGeneration(); }} /><button disabled={!ai.connected || ai.busy || prompt.trim().length < 2} onClick={requestGeneration}>{ai.busy ? "Working…" : ai.session?.entries.length ? "Send" : "Generate"}</button>{ai.busy ? <button className="regenerate" onClick={ai.cancel}>×</button> : <button aria-label="Regenerate proposal" className="regenerate" disabled={!ai.connected || !prompt.trim()} onClick={requestGeneration}>↻</button>}</div>
+    <div className="ai-composer-input"><input aria-label="AI diagram instruction" placeholder={ai.session?.entries.length ? "Continue: move MFA below Auth Service…" : "Describe the technical chart you want to create…"} value={prompt} onChange={(event) => updatePrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && ai.connected && !ai.busy) requestGeneration(); }} /><button disabled={!ai.connected || ai.busy || prompt.trim().length < 2} onClick={requestGeneration} title={sendBlockedReason(ai.connected, ai.busy, prompt)}>{ai.busy ? "Working…" : ai.session?.entries.length ? "Send" : "Generate"}</button>{ai.busy ? <button className="regenerate" onClick={ai.cancel}>×</button> : <button aria-label="Regenerate proposal" className="regenerate" disabled={!ai.connected || !prompt.trim()} onClick={requestGeneration}>↻</button>}</div>
     {image ? <div className="ai-image-chip"><img src={image.dataUrl} alt="Diagram reference" /><span>Sent directly to AI Gateway</span><button onClick={() => setImage(undefined)}>Remove</button></div> : null}
     <small>{ai.status}</small>
-    {sessionOpen ? <aside aria-label="AI working session" className="ai-session-panel">
+    <button
+      aria-expanded={sessionOpen}
+      aria-label={sessionOpen ? "Close AI conversation" : "Open AI conversation"}
+      className={[
+        "ai-chat-bubble",
+        sessionOpen ? "is-open" : "is-closed",
+        bubble.dragging ? "is-dragging" : "",
+        !sessionOpen && !everOpened ? "is-inviting" : "",
+        !sessionOpen && ai.busy ? "is-busy" : "",
+      ].filter(Boolean).join(" ")}
+      onPointerDown={bubble.onPointerDown}
+      style={{ right: `${bubble.position.right}px`, bottom: `${bubble.position.bottom}px`, width: `${launcherWidth}px`, height: `${BUBBLE_SIZE}px` }}
+      title={sessionOpen ? "Close AI conversation" : "Chat with the AI — drag to move"}
+      type="button"
+    >
+      <span className="ai-chat-bubble-mark" aria-hidden="true">{sessionOpen ? "\u00d7" : "\u2726"}</span>
+      {sessionOpen ? null : <span className="ai-chat-bubble-label">{ai.busy ? "Working\u2026" : "Chat AI"}</span>}
+      {!sessionOpen && ai.session?.entries.length ? <i aria-hidden="true">{ai.session.entries.length}</i> : null}
+    </button>
+    {sessionOpen ? <aside aria-label="AI working session" className="ai-session-panel" ref={panelRef} style={{ left: `${placement.left}px`, top: `${placement.top}px` }}>
       <header><div><span>WORKING SESSION</span><strong>{ai.session?.entries.length ? "Continue refining this chart" : "Start a chart conversation"}</strong></div><div><button disabled={ai.busy || !ai.session?.entries.length} onClick={() => { if (window.confirm("Start a new AI session for this workspace?")) ai.clearSession(); }}>New</button><button aria-label="Close AI session" onClick={() => setSessionOpen(false)}>×</button></div></header>
-      <div className="ai-session-history">{ai.session?.entries.length ? ai.session.entries.slice(-20).map((entry) => <article className={`is-${entry.role}`} key={entry.id}><div><b>{entry.role === "user" ? "You" : "AI"}</b>{entry.proposalStatus ? <i className={`is-${entry.proposalStatus}`}>{entry.proposalStatus}</i> : null}</div><p>{entry.body}</p></article>) : <div className="ai-session-empty"><i /><strong>No messages yet</strong><p>Describe the first chart in the composer. Follow-up messages will keep this workspace and conversation as context.</p></div>}{ai.busy && ai.activity ? <AiActivityMessage activity={ai.activity} onCancel={ai.cancel} /> : null}<div ref={sessionEndRef} /></div>
-      <footer><input aria-label="Continue AI session" placeholder="Adjust layout, add a path, simplify the chart…" value={prompt} onChange={(event) => updatePrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && ai.connected && !ai.busy) requestGeneration(); }} /><button disabled={!ai.connected || ai.busy || prompt.trim().length < 2} onClick={requestGeneration}>{ai.busy ? "…" : "Send"}</button></footer>
+      <div className="ai-session-picker">
+        <div><span>Past conversations</span><b>{ai.sessions.length}</b></div>
+        <div className="ai-session-list">
+          {ai.sessions.length ? ai.sessions.map((thread) => <article className={thread.id === ai.session?.id ? "is-active" : ""} key={thread.id}>
+            <button
+              className="ai-session-open"
+              onClick={() => ai.openSession(thread.id)}
+              title={sessionTitle(thread)}
+            >
+              <strong>{sessionTitle(thread)}</strong>
+              <small>{thread.entries.length} message{thread.entries.length === 1 ? "" : "s"} · {new Date(thread.updatedAt).toLocaleString()}</small>
+            </button>
+            <button
+              aria-label={`Delete conversation ${sessionTitle(thread)}`}
+              className="ai-session-remove"
+              onClick={() => { if (window.confirm("Delete this conversation? It cannot be recovered.")) ai.removeSession(thread.id); }}
+            >×</button>
+          </article>) : <p className="ai-session-empty">Nothing yet. Ask something and it is kept here.</p>}
+        </div>
+      </div>
+      <div className="ai-session-history">{ai.session?.entries.length ? ai.session.entries.map((entry) => <article className={`is-${entry.role}`} key={entry.id}><div><b>{entry.role === "user" ? "You" : "AI"}</b>{entry.proposalStatus ? <i className={`is-${entry.proposalStatus}`}>{entry.proposalStatus}</i> : null}</div><p>{entry.body}</p></article>) : <div className="ai-session-empty"><i /><strong>No messages yet</strong><p>Describe the first chart in the composer. Follow-up messages will keep this workspace and conversation as context.</p></div>}{ai.busy && ai.activity ? <AiActivityMessage activity={ai.activity} onCancel={ai.cancel} /> : null}<div ref={sessionEndRef} /></div>
+      <footer>
+        <input
+          aria-label="Continue AI session"
+          placeholder="Adjust layout, add a path, simplify the chart…"
+          value={prompt}
+          onChange={(event) => updatePrompt(event.target.value)}
+          onKeyDown={(event) => { if (event.key === "Enter" && ai.connected && !ai.busy) sendChatMessage(); }}
+        />
+        {ai.connected
+          ? <button disabled={ai.busy || prompt.trim().length < 2} onClick={sendChatMessage} title={sendBlockedReason(ai.connected, ai.busy, prompt)}>{ai.busy ? "…" : "Send"}</button>
+          : <button className="is-connect" onClick={() => window.dispatchEvent(new Event(aiSettingsOpenEvent))} title="No AI gateway is connected yet">Connect</button>}
+        {ai.connected ? null : <small>Connect an AI gateway to send messages.</small>}
+      </footer>
     </aside> : null}
     {clarificationOpen ? <div className="clarification-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setClarificationOpen(false); }}>
       <section aria-label="Clarify diagram request" aria-modal="true" className="clarification-dialog" role="dialog">
@@ -581,23 +766,18 @@ async function probeConnector(url: string): Promise<Probe> {
 
 function useConnectorProbes(open: boolean) {
   const [server, setServer] = useState<Probe>({ state: "checking" });
-  const [own, setOwn] = useState<Probe>({ state: "checking" });
 
   const check = useCallback(async () => {
     setServer({ state: "checking" });
-    setOwn({ state: "checking" });
-    await Promise.all([
-      probeConnector(resolveConnectorUrl()).then(setServer),
-      probeConnector(ownMachineConnectorUrl).then(setOwn),
-    ]);
+    setServer(await probeConnector(resolveConnectorUrl()));
   }, []);
 
   useEffect(() => { if (open) void check(); }, [check, open]);
-  return { server, own, check };
+  return { server, check };
 }
 
 // Six ways in, differing only in where the AI runs and what has to be supplied.
-type CardKind = "server" | "own-machine" | "key";
+type CardKind = "server" | "key";
 type ConnectionCard = {
   provider: string;
   kind: CardKind;
@@ -610,13 +790,22 @@ type ConnectionCard = {
   keyHelp?: string;
 };
 
+/**
+ * What you can connect the editor to.
+ *
+ * The "local model" is the infographic server's own AI — it runs here, not on
+ * the reader's machine, and calling it "local" made it sound like something
+ * they had to install. The two CLI options are gone: they needed a connector
+ * process running on the viewer's own computer, which almost nobody had, so
+ * they showed up permanently greyed out with a "CLI not found" warning.
+ *
+ * What is left is the server's own model plus the three keys you can paste in.
+ */
 const connectionCards: ConnectionCard[] = [
-  { provider: "local", kind: "server", mark: "OL", markClass: "is-local", title: "Local Model", blurb: "A model running on the editor's own server. Nothing to install and nothing to pay — the slowest of the options, and best for drafts.", missing: "model server" },
-  { provider: "anthropic", kind: "own-machine", mark: "CL", markClass: "is-claude", title: "Claude CLI", blurb: "The Claude Code login already on YOUR machine. Uses your existing subscription, so no key and no per-token cost. Needs the connector running.", missing: "Claude CLI" },
-  { provider: "codex", kind: "own-machine", mark: "CX", markClass: "is-codex", title: "Codex CLI", blurb: "The Codex login already on YOUR machine. Uses your existing subscription. Needs the connector running.", missing: "Codex CLI" },
-  { provider: "anthropic-api", kind: "key", mark: "AK", markClass: "is-claude", title: "Claude API key", blurb: "Nothing to install. Your browser calls Anthropic directly and the key never reaches this server. Billed to your API account, not a Pro/Max plan.", missing: "", keyHint: "sk-ant-…", keyHelp: "console.anthropic.com → API keys" },
-  { provider: "gemini", kind: "key", mark: "GM", markClass: "is-gemini", title: "Gemini API key", blurb: "Nothing to install. Your browser calls Google directly. A free AI Studio key works and reads attached images.", missing: "", keyHint: "AIza…", keyHelp: "aistudio.google.com → Get API key" },
-  { provider: "openai", kind: "key", mark: "OA", markClass: "is-openai", title: "OpenAI API key", blurb: "Nothing to install. Your browser calls OpenAI directly and the key never reaches this server. Billed to your API account.", missing: "", keyHint: "sk-…", keyHelp: "platform.openai.com → API keys" },
+  { provider: "local", kind: "server", mark: "AI", markClass: "is-local", title: "Infographic AI", blurb: "The model running on this infographic server. Nothing to install, nothing to pay, and no key — the slowest of the options, and the right one for drafts.", missing: "model server" },
+  { provider: "anthropic-api", kind: "key", mark: "CL", markClass: "is-claude", title: "Claude (API key)", blurb: "Your browser calls Anthropic directly and the key never reaches this server. Billed to your API account, not a Pro/Max plan.", missing: "", keyHint: "sk-ant-…", keyHelp: "console.anthropic.com → API keys" },
+  { provider: "gemini", kind: "key", mark: "GM", markClass: "is-gemini", title: "Gemini (API key)", blurb: "Your browser calls Google directly. A free AI Studio key works, and it reads attached images.", missing: "", keyHint: "AIza…", keyHelp: "aistudio.google.com → Get API key" },
+  { provider: "openai", kind: "key", mark: "CX", markClass: "is-openai", title: "Codex (OpenAI key)", blurb: "Your browser calls OpenAI directly and the key never reaches this server. Billed to your API account.", missing: "", keyHint: "sk-…", keyHelp: "platform.openai.com → API keys" },
 ];
 
 export function AiConnectionSettings({ open, onClose }: { open: boolean; onClose(): void }) {
@@ -624,30 +813,23 @@ export function AiConnectionSettings({ open, onClose }: { open: boolean; onClose
   const [gatewayUrl, setGatewayUrl] = useState("");
   const [models, setModels] = useState<Record<string, string>>({});
   const [keys, setKeys] = useState<Record<string, string>>({});
-  const { server, own, check } = useConnectorProbes(open);
+  const { server, check } = useConnectorProbes(open);
   useEffect(() => { if (ai.gatewayOrigin && !["local-mock", "browser-direct"].includes(ai.gatewayOrigin)) setGatewayUrl(ai.gatewayOrigin); }, [ai.gatewayOrigin]);
   if (!open) return null;
 
-  const probeFor = (card: ConnectionCard) => card.kind === "server" ? server : own;
-  const detailFor = (card: ConnectionCard) => {
-    const probe = probeFor(card);
-    return probe.state === "ready" ? probe.details.find((detail) => detail.id === card.provider) : undefined;
-  };
+  // Only the server-side model is probed now; key-based options need no probe.
+  const detailFor = (card: ConnectionCard) =>
+    card.kind === "server" && server.state === "ready"
+      ? server.details.find((detail: { id: string }) => detail.id === card.provider)
+      : undefined;
 
   const unavailable = (card: ConnectionCard) => {
+    // A key-based option is always offered: whether the key works is something
+    // only the provider can answer, and it says so when the key is saved.
     if (card.kind === "key") return undefined;
-    const probe = probeFor(card);
-    if (probe.state === "checking") return "Looking for a connector…";
-    if (probe.state === "unreachable") {
-      return card.kind === "server"
-        ? `The editor's own AI is not answering. ${probe.reason}`
-        : `No connector on your machine. ${probe.reason} Set it up below.`;
-    }
-    if (!probe.backends.includes(card.provider)) {
-      return card.kind === "server"
-        ? "The editor's server does not offer this."
-        : `Your connector is running, but it did not find the ${card.missing} on your machine.`;
-    }
+    if (server.state === "checking") return "Checking the server…";
+    if (server.state === "unreachable") return `The infographic server's AI is not answering. ${server.reason}`;
+    if (!server.backends.includes(card.provider)) return "This server does not offer a model right now.";
     return undefined;
   };
 
@@ -667,8 +849,6 @@ export function AiConnectionSettings({ open, onClose }: { open: boolean; onClose
   };
 
   const activeProvider = ai.providers.find((provider) => provider.id === ai.providerId);
-  const ownReady = own.state === "ready";
-  const downloadCommand = `curl -fsSL ${typeof window === "undefined" ? "" : window.location.origin}/connector -o ti-connector.mjs && node ti-connector.mjs --editor ${typeof window === "undefined" ? "" : window.location.origin}`;
 
   return <div className="config-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section aria-label="Application configuration" aria-modal="true" className="config-dialog" role="dialog">
@@ -701,12 +881,12 @@ export function AiConnectionSettings({ open, onClose }: { open: boolean; onClose
         })}
         <article className="is-organization"><div className="connection-mark is-gateway">GW</div><div><strong>Organization Gateway</strong><p>Connect to an AI Gateway controlled by your organization through SSO.</p><input aria-label="Organization AI Gateway URL" inputMode="url" placeholder="https://ai.your-company.com" value={gatewayUrl} onChange={(event) => setGatewayUrl(event.target.value)} /></div><button disabled={ai.busy || !gatewayUrl.trim()} onClick={() => void ai.connect(gatewayUrl).catch(() => undefined)}>Continue with SSO</button></article>
       </div>
-      <footer className={ownReady ? "" : "is-warning"}>
-        <span>YOUR MACHINE</span>
-        {ownReady
-          ? <><code>connected · {own.state === "ready" && own.backends.length ? own.backends.join(", ") : "no backend reported"}</code><small>Your CLI login stays on your machine. This page only ever holds a token that expires in 8 hours.</small></>
-          : <><code>{downloadCommand}</code><small>Run this once, in a terminal on your own machine, to use Claude CLI or Codex CLI. Needs Node 20+. Then press Check again.</small></>}
-        <button className="recheck" disabled={own.state === "checking"} onClick={() => void check()}>{own.state === "checking" ? "Checking…" : "Check again"}</button>
+      <footer className={server.state === "ready" ? "" : "is-warning"}>
+        <span>INFOGRAPHIC AI</span>
+        {server.state === "ready"
+          ? <><code>ready · {server.backends.length ? server.backends.join(", ") : "no model reported"}</code><small>Runs on this server. Prompts for the key-based options never touch it — those go from your browser straight to the provider.</small></>
+          : <><code>{server.state === "checking" ? "checking…" : "not reachable"}</code><small>The server model is unavailable right now. The three key options below work regardless.</small></>}
+        <button className="recheck" disabled={server.state === "checking"} onClick={() => void check()}>{server.state === "checking" ? "Checking…" : "Check again"}</button>
       </footer>
     </section>
   </div>;

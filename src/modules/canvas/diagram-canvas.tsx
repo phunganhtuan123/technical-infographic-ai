@@ -38,8 +38,12 @@ import {
   type PrimitiveDefinition,
 } from "@/modules/diagram/factory";
 import type { DiagramDocument, DiagramEdge, DiagramNode, EdgeDirection, EdgeSemantics } from "@/modules/diagram/schema";
+import { edgeColor, edgeColors } from "@/modules/catalog/catalog";
+import { edgeLanes } from "./edge-lanes";
 import { exportBounds } from "@/modules/diagram/bounds";
-import { layoutDocument } from "@/modules/layout/layout-document";
+import { FlowTraceStyles } from "./flow-trace-styles";
+import { useFlowTrace } from "./use-flow-trace";
+import { layoutDocument, planPorts } from "@/modules/layout/layout-document";
 import { EdgeCaptionEditContext, EdgeLabelMoveContext, EdgeRouteMoveContext, SemanticEdge, edgeCaptionEditEvent, type SemanticFlowEdge } from "./semantic-edge";
 import { ContainerLabelMoveContext, NodeInlineEditContext, SemanticNode, type SemanticFlowNode } from "./semantic-node";
 
@@ -140,15 +144,8 @@ function containerDescendants(containerId: string, nodes: SemanticFlowNode[]) {
   return nodes.filter((node) => ids.has(node.id));
 }
 
-function edgeColor(semantics: EdgeSemantics) {
-  if (semantics === "event") return "#fbbf24";
-  if (semantics === "data" || semantics === "feedback") return "#a78bfa";
-  if (semantics === "failure") return "#fb7185";
-  return "#b6ff5c";
-}
-
 function edgeMarkers(direction: EdgeDirection, color: string) {
-  const marker = { type: MarkerType.ArrowClosed, color, width: 12, height: 12 };
+  const marker = { type: MarkerType.ArrowClosed, color, width: 18, height: 18, strokeWidth: 1.1 };
   return {
     markerStart: direction === "reverse" || direction === "both" ? marker : undefined,
     markerEnd: direction === "forward" || direction === "both" ? marker : undefined,
@@ -164,6 +161,8 @@ function toFlow(document: DiagramDocument) {
     zIndex: nodeZIndex(node),
     data: node,
   }));
+  const lanes = edgeLanes(document.edges);
+
   const edges: SemanticFlowEdge[] = document.edges.map((edge, index) => ({
     id: edge.id,
     type: "semantic",
@@ -186,7 +185,10 @@ function toFlow(document: DiagramDocument) {
       labelOffset: edge.labelOffset ?? { x: 0, y: 0 },
       routeWaypoints: edge.routeWaypoints,
       routeWaypoint: edge.routeWaypoint,
-      routeOffset: 16 + (index % 4) * 7,
+      routeOffset: lanes.get(edge.id)?.detour ?? 16,
+      portLead: lanes.get(edge.id)?.lead ?? 14,
+      anchorShift: lanes.get(edge.id)?.shift ?? 0,
+      targetShift: lanes.get(edge.id)?.targetShift ?? 0,
     },
     ...edgeMarkers(edge.direction, edge.color ?? edgeColor(edge.semantics)),
   }));
@@ -299,6 +301,32 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
       restoringRef.current = false;
       setHistoryRevision((value) => value + 1);
     }, [readOnly, replaceCanvas]);
+
+    /**
+     * Re-choose the anchors on the connectors touching a box that just moved.
+     *
+     * Auto-layout recomputes these, but dragging did not: a box pulled from
+     * beside another to below it kept its right-facing anchor, so the connector
+     * left sideways and doubled back — a long L around the box instead of a
+     * short line into the top of it.
+     *
+     * Only the connectors that touch the moved box are reconsidered. The rest
+     * keep whatever they have, including anchors chosen by hand.
+     */
+    const reanchor = useCallback((nextNodes: SemanticFlowNode[], currentEdges: SemanticFlowEdge[], movedId: string) => {
+      const asDocument = toDocument(document, nextNodes, currentEdges);
+      const plan = planPorts(asDocument.edges, new Map(asDocument.nodes.map((node) => [node.id, node])));
+      return currentEdges.map((edge) => {
+        if (edge.source !== movedId && edge.target !== movedId) return edge;
+        const ports = plan.get(edge.id);
+        if (!ports) return edge;
+        return {
+          ...edge,
+          sourceHandle: sourceHandleId(ports.sourcePort),
+          targetHandle: targetHandleId(ports.targetPort),
+        };
+      });
+    }, [document]);
 
     const arrange = useCallback(async () => {
       if (nodesRef.current.length === 0) return;
@@ -661,8 +689,8 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
         id: `edge-${crypto.randomUUID()}`,
         type: "semantic",
         selected: true,
-        data: { semantics: "request", important: true, animated: true, direction: "forward", thickness: 1.8, color: "#b6ff5c", strokeStyle: "solid", effect: "pulse", speed: 2.1, labelOffset: { x: 0, y: 0 } },
-        ...edgeMarkers("forward", "#b6ff5c"),
+        data: { semantics: "request", important: true, animated: true, direction: "forward", thickness: 1.8, color: edgeColors.request, strokeStyle: "solid", effect: "pulse", speed: 2.1, labelOffset: { x: 0, y: 0 } },
+        ...edgeMarkers("forward", edgeColors.request),
       };
       const next = addEdge(edge, edgesRef.current.map((candidate) => ({ ...candidate, selected: false }))) as SemanticFlowEdge[];
       const nextNodes = nodesRef.current.map((node) => ({ ...node, selected: false }));
@@ -700,10 +728,11 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
     const canRedo = historyRef.current.future.length > 0;
     // Recomputed only when the drawing actually moves, not on every render.
     const frame = useMemo(() => exportBounds(document), [document]);
+    const trace = useFlowTrace(document);
     void historyRevision;
 
     return (
-      <div className="canvas-wrap" onContextMenuCapture={openContextMenu} onPointerDownCapture={() => { interactedRef.current = true; }} ref={wrapperRef}>
+      <div className={`canvas-wrap${trace.active ? " is-tracing" : ""}`} onContextMenuCapture={openContextMenu} onPointerDownCapture={() => { interactedRef.current = true; }} ref={wrapperRef}>
         <div className="canvas-toolbar">
           <button aria-label="Undo" disabled={readOnly || !canUndo} onClick={() => restore("undo")} title="Undo (⌘Z)" type="button">↺</button>
           <button aria-label="Redo" disabled={readOnly || !canRedo} onClick={() => restore("redo")} title="Redo (⇧⌘Z)" type="button">↻</button>
@@ -716,8 +745,24 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
           <button aria-label="Zoom out" onClick={() => { viewportPinnedRef.current = true; void zoomOut({ duration: 160 }); }} type="button">−</button>
           <button aria-label="Reset zoom to 100%" className="zoom-readout" onClick={() => { viewportPinnedRef.current = true; void zoomTo(1, { duration: 160 }); }} type="button">{Math.round(zoom * 100)}%</button>
           <button aria-label="Zoom in" onClick={() => { viewportPinnedRef.current = true; void zoomIn({ duration: 160 }); }} type="button">+</button>
+          <i className="canvas-toolbar-divider" />
+          <button
+            aria-label={trace.playing ? "Pause walkthrough" : "Play walkthrough"}
+            className={trace.active ? "trace-button is-on" : "trace-button"}
+            disabled={trace.steps.length < 2}
+            onClick={() => (trace.playing ? trace.pause() : trace.play())}
+            title="Light the diagram up one step at a time"
+            type="button"
+          >{trace.playing ? "❚❚ Playing" : "▶ Walkthrough"}</button>
+          {trace.active ? <>
+            <button aria-label="Previous step" onClick={trace.stepBack} type="button">‹</button>
+            <span className="trace-step">{trace.index + 1}/{trace.steps.length}</span>
+            <button aria-label="Next step" onClick={trace.stepForward} type="button">›</button>
+            <button aria-label="Stop walkthrough" onClick={trace.stop} type="button">×</button>
+          </> : null}
           <span>{nodes.length} nodes · {edges.length} connections</span>
         </div>
+        <FlowTraceStyles enabled={trace.active} highlight={trace.highlight} />
         {nodes.length === 0 ? (
           <div className="canvas-empty"><i>＋</i><strong>Start with a primitive</strong><span>Click an item or drag it from the library</span></div>
         ) : null}
@@ -730,7 +775,7 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
         <NodeInlineEditContext.Provider value={editNodeInline}>
         <ReactFlow<SemanticFlowNode, SemanticFlowEdge>
           connectionLineType={ConnectionLineType.Straight}
-          connectionLineStyle={{ stroke: "#b6ff5c", strokeWidth: 1.8, filter: "drop-shadow(0 0 5px rgba(182,255,92,.38))" }}
+          connectionLineStyle={{ stroke: edgeColors.request, strokeWidth: 2, strokeDasharray: "6 4" }}
           connectionMode={ConnectionMode.Loose}
           connectionRadius={56}
           edges={edges}
@@ -822,7 +867,7 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
             const container = containingContainer(alignedNode, peers);
             alignedNode.data = { ...alignedNode.data, containerId: container?.id };
             const next = nodesRef.current.map((candidate) => candidate.id === node.id ? alignedNode : candidate);
-            replaceCanvas(next, edgesRef.current);
+            replaceCanvas(next, reanchor(next, edgesRef.current, node.id));
             setAlignmentGuides(null);
           }}
           onNodesChange={handleNodesChange}
@@ -840,8 +885,8 @@ const CanvasInner = forwardRef<DiagramCanvasHandle, DiagramCanvasProps>(
           snapGrid={[8, 8]}
           snapToGrid
         >
-          <Background id="minor-grid" color="#171717" gap={8} size={0.45} variant={BackgroundVariant.Lines} />
-          <Background id="major-grid" color="#292929" gap={32} size={0.8} variant={BackgroundVariant.Lines} />
+          <Background id="minor-grid" color="#e9edf4" gap={8} size={0.45} variant={BackgroundVariant.Lines} />
+          <Background id="major-grid" color="#dbe2ec" gap={32} size={0.8} variant={BackgroundVariant.Lines} />
           {/* The export frame, in diagram coordinates rather than screen ones, so
               it pans and zooms with the drawing. This is the exact rectangle the
               exporter will cover — nothing outside it is cropped, because the

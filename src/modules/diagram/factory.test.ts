@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { nodeInk, roleColors } from "@/modules/catalog/catalog";
 import { createBlankDocument, createDiagramNode, findAvailablePosition, primitiveDefinitions } from "./factory";
 import { diagramSamples } from "@/modules/fixtures/diagram-samples";
 import { compilePlan } from "@/modules/compiler/compile-plan";
@@ -15,8 +16,8 @@ describe("diagram factory", () => {
     expect(service).toBeDefined();
 
     const node = createDiagramNode(service!, { x: 120, y: 80 }, "service-1");
-    expect(node.color).toBe("#63e6ff");
-    expect(node).toMatchObject({ textColor: "#f5f5f5", fontFamily: "geist-mono", fontSize: 14, fontWeight: 700, textAlign: "left", borderStyle: "solid", borderWidth: 1, effect: "none", speed: 2.1, size: { width: 220, height: 104 } });
+    expect(node.color).toBe(roleColors.service);
+    expect(node).toMatchObject({ textColor: nodeInk, fontFamily: "geist-mono", fontSize: 14, fontWeight: 700, textAlign: "left", borderStyle: "solid", borderWidth: 1, effect: "none", speed: 2.1, size: { width: 220, height: 104 } });
     expect(node.ports.map((port) => port.id)).toContain("output");
     expect(node.ports.map((port) => port.id)).toContain("top-center");
   });
@@ -54,18 +55,32 @@ describe("diagram factory", () => {
     expect(nodeFor("note").size).toEqual({ width: 240, height: 136 });
   });
 
-  it("provides exactly one valid sample for every chart mode", () => {
+  it("covers every chart mode and keeps each template valid", () => {
     const modes = ["architecture", "flow", "sequence", "data-pipeline", "event-driven", "agent-loop", "infrastructure", "comparison", "explainer-grid"];
-    expect(diagramSamples).toHaveLength(modes.length);
-    expect(diagramSamples.map((sample) => sample.number)).toEqual(Array.from({ length: modes.length }, (_, index) => index + 1));
-    expect(new Set(diagramSamples.map((sample) => sample.id)).size).toBe(modes.length);
-    expect(new Set(diagramSamples.map((sample) => sample.plan.title)).size).toBe(modes.length);
-    expect(diagramSamples.map((sample) => sample.plan.mode).sort()).toEqual([...modes].sort());
-    expect(diagramSamples.every((sample) => sample.plan.nodes.length >= 4 && (sample.plan.mode === "explainer-grid" || sample.plan.edges.length >= 3))).toBe(true);
-    expect(diagramSamples.every((sample) => {
+
+    // The library is no longer one sample per mode — it is a template gallery —
+    // but every mode must still be represented by at least one of them.
+    expect([...new Set(diagramSamples.map((sample) => sample.plan.mode))].sort()).toEqual([...modes].sort());
+
+    expect(diagramSamples.map((sample) => sample.number)).toEqual(diagramSamples.map((_, index) => index + 1));
+    expect(new Set(diagramSamples.map((sample) => sample.id)).size).toBe(diagramSamples.length);
+    expect(new Set(diagramSamples.map((sample) => sample.plan.id)).size).toBe(diagramSamples.length);
+    expect(new Set(diagramSamples.map((sample) => sample.plan.title)).size).toBe(diagramSamples.length);
+    expect(diagramSamples.every((sample) => sample.category.length > 0)).toBe(true);
+
+    for (const sample of diagramSamples) {
+      expect(sample.plan.nodes.length, `${sample.id} nodes`).toBeGreaterThanOrEqual(4);
+      if (sample.plan.mode !== "explainer-grid") {
+        expect(sample.plan.edges.length, `${sample.id} edges`).toBeGreaterThanOrEqual(3);
+      }
       const nodeIds = new Set(sample.plan.nodes.map((node) => node.id));
-      return nodeIds.size === sample.plan.nodes.length && sample.plan.edges.every((edge) => nodeIds.has(edge.from) && nodeIds.has(edge.to));
-    })).toBe(true);
-    expect(diagramSamples.every((sample) => compilePlan(sample.plan).nodes.length === sample.plan.nodes.length)).toBe(true);
+      expect(nodeIds.size, `${sample.id} duplicate node id`).toBe(sample.plan.nodes.length);
+      for (const edge of sample.plan.edges) {
+        expect(nodeIds.has(edge.from), `${sample.id}:${edge.id} unknown source`).toBe(true);
+        expect(nodeIds.has(edge.to), `${sample.id}:${edge.id} unknown target`).toBe(true);
+      }
+      expect(new Set(sample.plan.edges.map((edge) => edge.id)).size, `${sample.id} duplicate edge id`).toBe(sample.plan.edges.length);
+      expect(compilePlan(sample.plan).nodes.length, `${sample.id} compiles`).toBe(sample.plan.nodes.length);
+    }
   });
 });

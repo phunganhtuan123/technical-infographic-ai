@@ -1,4 +1,4 @@
-import { roleColors, technologyDetails, technologyOptions } from "@/modules/catalog/catalog";
+import { diagramTheme, nodeInk, roleColors, technologyDetails, technologyOptions } from "@/modules/catalog/catalog";
 import type {
   DiagramDocument,
   DiagramNode,
@@ -94,7 +94,7 @@ export function defaultNodeTypography(role: NodeRole): {
   textAlign: NodeTextAlign;
 } {
   return {
-    textColor: "#f5f5f5",
+    textColor: nodeInk,
     fontFamily: "geist-mono",
     fontSize: role === "text" ? 18 : role === "note" ? 13 : role === "zone" || role === "group" ? 10 : 14,
     fontWeight: role === "zone" || role === "group" ? 600 : 700,
@@ -138,7 +138,7 @@ export function createBlankDocument(id: string, title: string): DiagramDocument 
     purpose: "Drag a primitive onto the canvas to start a technical story.",
     nodes: [],
     edges: [],
-    theme: { background: "#080808", accent: "#b6ff5c" },
+    theme: { ...diagramTheme },
     format: "16:9",
   };
 }

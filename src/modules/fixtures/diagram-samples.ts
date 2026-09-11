@@ -1,7 +1,25 @@
 import type { DiagramPlan } from "@/modules/diagram/schema";
 import { architecturePlan } from "./architecture-plan";
+import {
+  cachingTemplate, cicdTemplate, cqrsTemplate, microservicesTemplate, multiRegionTemplate,
+  oauthTemplate, observabilityTemplate, ragTemplate, serverlessTemplate, webhookTemplate,
+} from "./architecture-templates";
 
-type DiagramSample = { id: string; number: number; label: string; description: string; plan: DiagramPlan };
+/**
+ * Templates are grouped so the picker can be read at a glance: the "Diagram
+ * kinds" show what each mode looks like, the rest are architectures you start
+ * from and rename.
+ */
+export type TemplateCategory = "Diagram kinds" | "Architecture" | "Data & events" | "AI" | "Delivery";
+
+type DiagramSample = {
+  id: string;
+  number: number;
+  label: string;
+  description: string;
+  category: TemplateCategory;
+  plan: DiagramPlan;
+};
 
 const samples: DiagramPlan[] = [
   {
@@ -137,15 +155,31 @@ const explainerGridSample: DiagramPlan = {
 };
 
 const diagramSampleDefinitions: Array<Omit<DiagramSample, "number">> = [
-  { id: "architecture", label: "Architecture", description: "Synchronous services, async work, and data", plan: architecturePlan },
-  { id: "flow", label: "Flow", description: "Decision-driven checkout path", plan: samples[0] },
-  { id: "sequence", label: "Sequence", description: "Authentication messages and return path", plan: samples[1] },
-  { id: "data-pipeline", label: "Data pipeline", description: "Ingest, enrich, store, and serve", plan: samples[2] },
-  { id: "event-driven", label: "Event-driven", description: "Transactional write and async fan-out", plan: samples[3] },
-  { id: "agent-loop", label: "Agent loop", description: "Tool execution and feedback cycle", plan: samples[4] },
-  { id: "infrastructure", label: "Infrastructure", description: "Production Kubernetes request path", plan: infrastructureSample },
-  { id: "comparison", label: "Comparison", description: "REST versus event-driven integration", plan: comparisonSample },
-  { id: "explainer-grid", label: "Explainer grid", description: "One concept per engineering card", plan: explainerGridSample },
+  { id: "architecture", category: "Diagram kinds", label: "Architecture", description: "Synchronous services, async work, and data", plan: architecturePlan },
+  { id: "flow", category: "Diagram kinds", label: "Flow", description: "Decision-driven checkout path", plan: samples[0] },
+  { id: "sequence", category: "Diagram kinds", label: "Sequence", description: "Authentication messages and return path", plan: samples[1] },
+  { id: "data-pipeline", category: "Diagram kinds", label: "Data pipeline", description: "Ingest, enrich, store, and serve", plan: samples[2] },
+  { id: "event-driven", category: "Diagram kinds", label: "Event-driven", description: "Transactional write and async fan-out", plan: samples[3] },
+  { id: "agent-loop", category: "Diagram kinds", label: "Agent loop", description: "Tool execution and feedback cycle", plan: samples[4] },
+  { id: "infrastructure", category: "Diagram kinds", label: "Infrastructure", description: "Production Kubernetes request path", plan: infrastructureSample },
+  { id: "comparison", category: "Diagram kinds", label: "Comparison", description: "REST versus event-driven integration", plan: comparisonSample },
+  { id: "explainer-grid", category: "Diagram kinds", label: "Explainer grid", description: "One concept per engineering card", plan: explainerGridSample },
+
+  { id: "microservices", category: "Architecture", label: "Microservices", description: "One gateway in front of independent services", plan: microservicesTemplate },
+  { id: "caching", category: "Architecture", label: "Caching layers", description: "Browser, edge, process, shared, database", plan: cachingTemplate },
+  { id: "serverless", category: "Architecture", label: "Serverless API", description: "Managed edge, functions, key-value store", plan: serverlessTemplate },
+  { id: "multi-region", category: "Architecture", label: "Multi-region", description: "Active-passive with a promoted replica", plan: multiRegionTemplate },
+
+  { id: "cqrs", category: "Data & events", label: "CQRS + event sourcing", description: "Append events, project a read model", plan: cqrsTemplate },
+  { id: "webhooks", category: "Data & events", label: "Webhook delivery", description: "Retry with backoff, then dead-letter", plan: webhookTemplate },
+  { id: "observability", category: "Data & events", label: "Observability", description: "Metrics, logs, traces and who is paged", plan: observabilityTemplate },
+
+  { id: "rag", category: "AI", label: "RAG pipeline", description: "Retrieve, rerank, answer with citations", plan: ragTemplate },
+
+  { id: "cicd", category: "Delivery", label: "CI/CD pipeline", description: "Commit to verified production release", plan: cicdTemplate },
+  { id: "oauth", category: "Delivery", label: "OAuth 2.0 + PKCE", description: "Authorization code, both outcomes", plan: oauthTemplate },
 ];
+
+export const templateCategories: TemplateCategory[] = ["Diagram kinds", "Architecture", "Data & events", "AI", "Delivery"];
 
 export const diagramSamples: DiagramSample[] = diagramSampleDefinitions.map((sample, index) => ({ ...sample, number: index + 1 }));

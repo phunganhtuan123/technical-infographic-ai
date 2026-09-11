@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { edgeColors, roleColors } from "@/modules/catalog/catalog";
+import { widthForLabel } from "@/modules/diagram/label-metrics";
 import { architecturePlan } from "@/modules/fixtures/architecture-plan";
 import { compilePlan } from "./compile-plan";
 
@@ -14,14 +16,17 @@ describe("compilePlan", () => {
       animated: true,
       direction: "forward",
       thickness: 1.8,
-      color: "#fbbf24",
+      color: edgeColors.event,
       strokeStyle: "dashed",
       effect: "dash",
       speed: 2.7,
       labelOffset: { x: 0, y: 0 },
     });
-    expect(database?.color).toBe("#a78bfa");
-    expect(database).toMatchObject({ borderStyle: "solid", borderWidth: 1, effect: "glow", speed: 2.1, size: { width: 220, height: 104 } });
+    expect(database?.color).toBe(roleColors.database);
+    expect(database).toMatchObject({ borderStyle: "solid", borderWidth: 1, effect: "glow", speed: 2.1 });
+    // Width follows the label, so assert the rule rather than a fixed number.
+    expect(database?.size.height).toBe(104);
+    expect(database?.size.width).toBe(widthForLabel(database!.label, database!.detail));
     expect(document.edges.find((edge) => edge.id === "event-notify")).toMatchObject({
       sourcePort: "event-output",
       targetPort: "event-input-bottom",

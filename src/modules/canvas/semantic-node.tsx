@@ -1,5 +1,7 @@
 import { Handle, NodeResizer, Position, type Node, type NodeProps } from "@xyflow/react";
 import { createContext, useContext, useSyncExternalStore, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { resolveNodeColor, resolveNodeInk } from "@/modules/catalog/catalog";
+import { MathText } from "@/modules/diagram/math-text";
 import { ComponentIcon } from "@/modules/catalog/component-icon";
 import { TechnologyIcon } from "@/modules/catalog/technology-icon";
 import type { DiagramNode } from "@/modules/diagram/schema";
@@ -69,7 +71,7 @@ export function SemanticNode({ data, selected }: NodeProps<SemanticFlowNode>) {
   const moveContainerLabel = useContext(ContainerLabelMoveContext);
   const backgroundUrl = useBackgroundUrl(data.backgroundImage);
   const shape = data.role in flowShapes ? flowShapes[data.role as keyof typeof flowShapes] : undefined;
-  const label = selected ? <InlineField ariaLabel="Inline component name" className="node-inline-name" value={data.label} onChange={(value) => editNode(data.id, { label: value })} /> : <strong>{data.label}</strong>;
+  const label = selected ? <InlineField ariaLabel="Inline component name" className="node-inline-name" value={data.label} onChange={(value) => editNode(data.id, { label: value })} /> : <strong><MathText value={data.label} /></strong>;
   const detail = selected ? <InlineField ariaLabel="Inline component description" className="node-inline-detail" value={data.detail ?? ""} onChange={(value) => editNode(data.id, { detail: value })} /> : null;
   const isContainer = data.role === "zone" || data.role === "group";
   const isAnnotation = data.role === "text" || data.role === "note";
@@ -101,9 +103,9 @@ export function SemanticNode({ data, selected }: NodeProps<SemanticFlowNode>) {
   return (
     <article
       className={`semantic-node semantic-node--${data.role}${shape ? " semantic-node--flow" : ""} node-border-${data.borderStyle}${data.effect !== "none" ? ` node-effect-${data.effect}` : ""}${data.previewStatus ? ` preview-${data.previewStatus}` : ""}${selected ? " is-selected" : ""}`}
-      style={{ "--node-color": data.color, "--node-text-color": data.textColor ?? "#f5f5f5", "--node-font-family": fontFamilies[fontFamily], "--node-font-size": `${fontSize}px`, "--node-font-weight": fontWeight, "--node-text-align": textAlign, "--node-border-width": `${data.borderWidth}px`, "--node-speed": `${data.speed}s` } as React.CSSProperties}
+      style={{ "--node-color": resolveNodeColor(data.color, data.role), "--node-text-color": resolveNodeInk(data.textColor, "var(--text)"), "--node-font-family": fontFamilies[fontFamily], "--node-font-size": `${fontSize}px`, "--node-font-weight": fontWeight, "--node-text-align": textAlign, "--node-border-width": `${data.borderWidth}px`, "--node-speed": `${data.speed}s` } as React.CSSProperties}
     >
-      <NodeResizer color={data.color} handleClassName="node-resize-handle" isVisible={selected} lineClassName="node-resize-line" minHeight={isContainer ? 160 : 72} minWidth={isContainer ? 280 : 140} maxHeight={isContainer ? 900 : 260} maxWidth={isContainer ? 1400 : 440} />
+      <NodeResizer color={resolveNodeColor(data.color, data.role)} handleClassName="node-resize-handle" isVisible={selected} lineClassName="node-resize-line" minHeight={isContainer ? 160 : 72} minWidth={isContainer ? 280 : 140} maxHeight={isContainer ? 900 : 260} maxWidth={isContainer ? 1400 : 440} />
       {backgroundUrl ? <span aria-hidden="true" className="node-background" style={{ backgroundImage: `url(${JSON.stringify(backgroundUrl)})`, backgroundPosition: "center", backgroundRepeat: "no-repeat", backgroundSize: data.backgroundFit ?? "cover", opacity: data.backgroundOpacity ?? 0.28 }} /> : null}
       {shape ? <svg className="node-shape" preserveAspectRatio="none" viewBox="0 0 220 104" aria-hidden="true"><path className={`node-shape-fill is-${data.borderStyle}`} d={shape} /></svg> : null}
       {!isContainer && !isAnnotation ? handles.flatMap(([id, position]) => [
@@ -116,14 +118,14 @@ export function SemanticNode({ data, selected }: NodeProps<SemanticFlowNode>) {
         <span aria-hidden="true" className="container-drag-edge is-bottom" />
         <span aria-hidden="true" className="container-drag-edge is-left" />
         <span className="container-label nodrag" onPointerDown={startContainerLabelDrag} style={containerLabelStyle(data.labelPosition ?? { side: "top", offset: 0.16 })}>{data.label}</span>
-      </> : isAnnotation ? <div className={`annotation-content annotation-content--${data.role}`}>{label}{detail ?? <span>{data.detail}</span>}</div> : shape ? <div className="flow-node-content"><span><ComponentIcon compact role={data.role} />{data.role.replace("-", " ")}</span>{label}{detail ?? <small>{data.detail ?? "flow step"}</small>}</div> : <>
+      </> : isAnnotation ? <div className={`annotation-content annotation-content--${data.role}`}>{label}{detail ?? <span><MathText value={data.detail ?? ""} /></span>}</div> : shape ? <div className="flow-node-content"><span><ComponentIcon compact role={data.role} />{data.role.replace("-", " ")}</span>{label}{detail ?? <small><MathText value={data.detail ?? "flow step"} /></small>}</div> : <>
         <div className="node-head">
           <span className="node-identity"><ComponentIcon compact role={data.role} /><span className="node-role">{data.role.replace("-", " ")}</span></span>
           <span className="node-indicators"><TechnologyIcon compact provider={data.provider} technology={data.technology} /><span className="node-status" aria-hidden="true" /></span>
         </div>
         {label}
         <div className="node-foot">
-          {detail ?? <span>{data.detail ?? data.technology ?? "system component"}</span>}
+          {detail ?? <span><MathText value={data.detail ?? data.technology ?? "system component"} /></span>}
           {data.technology ? <b>{data.technology.replace("gcp-", "").replace("aws-", "")}</b> : null}
         </div>
       </>}

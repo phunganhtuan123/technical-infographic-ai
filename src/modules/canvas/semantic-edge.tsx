@@ -8,6 +8,7 @@ import {
 } from "@xyflow/react";
 import { createContext, useContext, useEffect, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import type { DiagramNode, EdgeDirection, EdgeEffect, EdgeSemantics, EdgeStrokeStyle } from "@/modules/diagram/schema";
+import { resolveEdgeColor } from "@/modules/catalog/catalog";
 import type { SemanticFlowNode } from "./semantic-node";
 import { routeOrthogonal, type RouteControl, type RoutePoint } from "./orthogonal-router";
 
@@ -25,6 +26,9 @@ type SemanticEdgeData = {
   routeWaypoints?: Array<{ x: number; y: number }>;
   routeWaypoint?: { x: number; y: number };
   routeOffset?: number;
+  portLead?: number;
+  anchorShift?: number;
+  targetShift?: number;
 } & Record<string, unknown>;
 
 export type SemanticFlowEdge = Edge<SemanticEdgeData, "semantic">;
@@ -33,14 +37,6 @@ export const EdgeRouteMoveContext = createContext<(edgeId: string, waypoints: Ar
 export const EdgeCaptionEditContext = createContext<(edgeId: string, label: string) => void>(() => undefined);
 export const edgeCaptionEditEvent = "technical-infographic:edit-edge-caption";
 
-const colors: Record<EdgeSemantics, string> = {
-  request: "#b6ff5c",
-  event: "#fbbf24",
-  data: "#a78bfa",
-  feedback: "#a78bfa",
-  success: "#b6ff5c",
-  failure: "#fb7185",
-};
 
 function outward(point: RoutePoint, position: EdgeProps<SemanticFlowEdge>["sourcePosition"], distance: number) {
   if (position === "left") return { x: point.x - distance, y: point.y };
@@ -81,12 +77,31 @@ export function SemanticEdge(props: EdgeProps<SemanticFlowEdge>) {
   });
   const manualWaypoints = props.data?.routeWaypoints ?? (props.data?.routeWaypoint ? [props.data.routeWaypoint] : undefined);
   const markerPadding = 6;
+  /**
+   * Slide an endpoint along the edge it sits on.
+   *
+   * Two connectors leaving the same anchor towards boxes on the same row share
+   * a horizontal lane no matter how the router turns, because both start at the
+   * same height. Spreading them along the side they leave from is what actually
+   * separates them. Zero for a lone connector, so it still meets the box dead
+   * centre.
+   */
+  const alongSide = (point: RoutePoint, position: EdgeProps<SemanticFlowEdge>["sourcePosition"], shift: number) => {
+    if (!shift) return point;
+    return position === "left" || position === "right"
+      ? { x: point.x, y: point.y + shift }
+      : { x: point.x + shift, y: point.y };
+  };
+  const sourceShift = props.data?.anchorShift ?? 0;
+  const targetShift = props.data?.targetShift ?? 0;
+  const anchorSource = alongSide({ x: props.sourceX, y: props.sourceY }, props.sourcePosition, sourceShift);
+  const anchorTarget = alongSide({ x: props.targetX, y: props.targetY }, props.targetPosition, targetShift);
   const routeSource = props.data?.direction === "reverse" || props.data?.direction === "both"
-    ? outward({ x: props.sourceX, y: props.sourceY }, props.sourcePosition, markerPadding)
-    : { x: props.sourceX, y: props.sourceY };
+    ? outward(anchorSource, props.sourcePosition, markerPadding)
+    : anchorSource;
   const routeTarget = props.data?.direction === "forward" || props.data?.direction === "both"
-    ? outward({ x: props.targetX, y: props.targetY }, props.targetPosition, markerPadding)
-    : { x: props.targetX, y: props.targetY };
+    ? outward(anchorTarget, props.targetPosition, markerPadding)
+    : anchorTarget;
   const { path, labelX, labelY, controls, points } = routeOrthogonal({
     source: routeSource,
     target: routeTarget,
@@ -96,8 +111,12 @@ export function SemanticEdge(props: EdgeProps<SemanticFlowEdge>) {
     protectedObstacles,
     waypoints: manualWaypoints,
     offset: props.data?.routeOffset ?? 16,
+    portLead: props.data?.portLead ?? 14,
   });
-  const color = props.data?.color ?? colors[props.data?.semantics ?? "request"];
+  const color = resolveEdgeColor(props.data?.color, props.data?.semantics);
+  // Border stays the connector colour; the label text is mixed toward the body
+  // ink so a pale semantic hue is still readable at caption size.
+  const captionInk = `color-mix(in srgb, ${color} 46%, var(--text))`;
   const style = props.data?.strokeStyle ?? "solid";
   const effect = props.data?.effect ?? "pulse";
   const speed = props.data?.speed ?? 2.1;
@@ -172,7 +191,7 @@ export function SemanticEdge(props: EdgeProps<SemanticFlowEdge>) {
         interactionWidth={0}
         path={path}
         style={{
-          stroke: "#080808",
+          stroke: "var(--canvas-sheet, #ffffff)",
           strokeWidth: (props.data?.thickness ?? 1.8) + 9,
           strokeLinecap: "round",
           strokeLinejoin: "round",
@@ -184,7 +203,7 @@ export function SemanticEdge(props: EdgeProps<SemanticFlowEdge>) {
         className="semantic-edge-halo"
         interactionWidth={0}
         path={path}
-        style={{ stroke: color, strokeWidth: (props.data?.thickness ?? 1.8) + 2.5, strokeLinecap: "round", strokeLinejoin: "round", opacity: props.selected ? 0.34 : 0.16 }}
+        style={{ stroke: color, strokeWidth: (props.data?.thickness ?? 1.8) + 2.5, strokeLinecap: "round", strokeLinejoin: "round", opacity: props.selected ? 0.28 : 0 }}
       />
       <BaseEdge
         id={props.id}
@@ -197,10 +216,10 @@ export function SemanticEdge(props: EdgeProps<SemanticFlowEdge>) {
           "--edge-speed": `${speed}s`,
           "--edge-color": color,
           stroke: color,
-          strokeWidth: props.data?.thickness ?? (props.data?.important ? 1.8 : 1.2),
+          strokeWidth: props.data?.thickness ?? (props.data?.important ? 2.2 : 1.6),
           strokeDasharray: effect === "trail" && props.data?.animated && style === "solid" ? "12 9" : dasharray,
           strokeLinecap: style === "dotted" ? "round" : undefined,
-          opacity: props.selected ? 1 : props.data?.important ? 0.88 : 0.42,
+          opacity: props.selected ? 1 : props.data?.important ? 1 : 0.78,
           filter: props.selected ? `drop-shadow(0 0 5px ${color})` : undefined,
         } as CSSProperties}
       />
@@ -226,13 +245,13 @@ export function SemanticEdge(props: EdgeProps<SemanticFlowEdge>) {
             onBlur={() => { editCaption(props.id, captionDraft.trim()); setEditingCaption(false); }}
             onChange={(event) => setCaptionDraft(event.target.value)}
             onKeyDown={(event) => { event.stopPropagation(); if (event.key === "Enter") event.currentTarget.blur(); if (event.key === "Escape") setEditingCaption(false); }}
-            style={{ color, transform: `translate(-50%, -50%) translate(${labelX + labelOffset.x}px,${labelY + labelOffset.y}px)` }}
+            style={{ color: captionInk, borderColor: color, transform: `translate(-50%, -50%) translate(${labelX + labelOffset.x}px,${labelY + labelOffset.y}px)` }}
             value={captionDraft}
           /> : <span
             className={`edge-label${props.selected ? " is-selected" : ""}`}
             onDoubleClick={() => { setCaptionDraft(typeof props.label === "string" ? props.label : ""); setEditingCaption(true); }}
             onPointerDown={startLabelDrag}
-            style={{ color, transform: `translate(-50%, -50%) translate(${labelX + labelOffset.x}px,${labelY + labelOffset.y}px)` }}
+            style={{ color: captionInk, borderColor: color, transform: `translate(-50%, -50%) translate(${labelX + labelOffset.x}px,${labelY + labelOffset.y}px)` }}
           >{props.label}</span>}
         </EdgeLabelRenderer>
       ) : null}

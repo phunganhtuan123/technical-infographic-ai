@@ -1,35 +1,69 @@
-import type { NodeRole } from "@/modules/diagram/schema";
+import type { EdgeSemantics, NodeRole } from "@/modules/diagram/schema";
 
+/**
+ * Node colours, tuned for the light canvas.
+ *
+ * A node mixes this colour into white at about 8% for its fill and 24% for its
+ * border, so what is stored here is the ink, not the fill: it has to stay
+ * legible as the role label and the outline, which the old neon palette stopped
+ * doing the moment the background was no longer black.
+ *
+ * The flowchart roles carry the house convention: start and end are green, a
+ * decision is orange (and a diamond, via flowShapes), a process — the
+ * computation step — is blue, and input-output — where a result leaves the
+ * flow — is violet.
+ */
 export const roleColors: Record<NodeRole, string> = {
-  actor: "#f5f5f5",
-  gateway: "#60a5fa",
-  service: "#63e6ff",
-  "event-bus": "#fbbf24",
-  worker: "#fbbf24",
-  database: "#a78bfa",
-  cache: "#fb923c",
-  agent: "#b6ff5c",
-  tool: "#63e6ff",
-  model: "#a78bfa",
-  start: "#b6ff5c",
-  process: "#63e6ff",
-  decision: "#fbbf24",
-  "input-output": "#a78bfa",
-  end: "#fb7185",
-  document: "#f5f5f5",
-  subprocess: "#63e6ff",
-  "manual-input": "#a78bfa",
-  preparation: "#fbbf24",
-  delay: "#60a5fa",
-  connector: "#b6ff5c",
-  "off-page": "#fb7185",
-  merge: "#fbbf24",
-  "stored-data": "#a78bfa",
-  zone: "#60a5fa",
-  group: "#a78bfa",
-  text: "#f5f5f5",
-  note: "#fbbf24",
+  actor: "#475569",
+  gateway: "#2563eb",
+  service: "#0891b2",
+  "event-bus": "#d97706",
+  worker: "#c2410c",
+  database: "#7c3aed",
+  cache: "#ea580c",
+  agent: "#4d7c0f",
+  tool: "#0891b2",
+  model: "#7c3aed",
+  start: "#16a34a",
+  process: "#3b82f6",
+  decision: "#ea580c",
+  "input-output": "#9333ea",
+  end: "#16a34a",
+  document: "#64748b",
+  subprocess: "#3b82f6",
+  "manual-input": "#8b5cf6",
+  preparation: "#d97706",
+  delay: "#2563eb",
+  connector: "#16a34a",
+  "off-page": "#e11d48",
+  merge: "#d97706",
+  "stored-data": "#7c3aed",
+  zone: "#2563eb",
+  group: "#7c3aed",
+  text: "#334155",
+  note: "#d97706",
 };
+
+/**
+ * Edge colours by meaning. This table was written out at four call sites and
+ * had already drifted between them; keeping it in one place is what stops the
+ * canvas, the compiler and an AI plan disagreeing about a failure edge.
+ */
+export const edgeColors: Record<EdgeSemantics, string> = {
+  request: "#475569",
+  event: "#d97706",
+  data: "#7c3aed",
+  feedback: "#7c3aed",
+  success: "#16a34a",
+  failure: "#e11d48",
+};
+
+export function edgeColor(semantics: EdgeSemantics | undefined) {
+  return edgeColors[semantics ?? "request"] ?? edgeColors.request;
+}
+
+/** Canvas theme baked into exported documents. */
+export const diagramTheme = { background: "#fdfdfe", accent: "#4d7c0f" } as const;
 
 export const technologyCatalog = {
   postgresql: { label: "PostgreSQL", category: "database", badge: "PG", color: "#60a5fa", glyph: "database" },
@@ -152,4 +186,81 @@ export function searchBrandIcons(query: string, limit = 60) {
     if (starts.length >= limit) break;
   }
   return [...starts, ...contains].slice(0, limit);
+}
+
+/**
+ * The dark-only palette this editor shipped before the light canvas.
+ *
+ * Those values are neon: they were chosen to glow on near-black, and a node
+ * paints its fill by mixing its colour into the sheet at 8% and its border at
+ * 24%. Mixed into white instead, neon lime and cyan land close enough to the
+ * sheet that the node all but disappears — which is exactly what happens to a
+ * diagram saved by the old build and reopened on the light canvas.
+ *
+ * So a stored colour that matches one of these is treated as "the default for
+ * this role at the time", not as a decision, and is remapped. A colour the
+ * author actually picked is never touched.
+ */
+const legacyPalette: Record<string, string> = {
+  "#f5f5f5": "#475569",
+  "#63e6ff": "#0891b2",
+  "#b6ff5c": "#4d7c0f",
+  "#a78bfa": "#7c3aed",
+  "#fbbf24": "#d97706",
+  "#fb923c": "#ea580c",
+  "#fb7185": "#e11d48",
+  "#60a5fa": "#2563eb",
+};
+
+/**
+ * The colour to draw a node in, given what the document stored.
+ *
+ * A legacy default resolves to the current palette entry for that role, so an
+ * old start node comes back green rather than as the near-invisible lime it was
+ * saved as. Where the role is unknown the hue is mapped on its own.
+ */
+export function resolveNodeColor(color: string | undefined, role?: NodeRole) {
+  if (!color) return role ? roleColors[role] : legacyPalette["#f5f5f5"];
+  const key = color.toLowerCase();
+  if (!(key in legacyPalette)) return color;
+  return role ? roleColors[role] : legacyPalette[key];
+}
+
+/** The same rule for a connector, whose default came from its semantics. */
+export function resolveEdgeColor(color: string | undefined, semantics: EdgeSemantics | undefined) {
+  if (!color) return edgeColor(semantics);
+  const key = color.toLowerCase();
+  return key in legacyPalette ? edgeColor(semantics) : color;
+}
+
+/**
+ * Default node text. The canvas is light, so ink is dark.
+ *
+ * `legacyNodeInk` is the near-white this used to be. It is still written into
+ * every document saved before the light canvas, and treating it as "unset"
+ * rather than as a real choice is what keeps those diagrams readable instead of
+ * white-on-white. Anything else the user actually picked is honoured.
+ */
+export const nodeInk = "#0f172a";
+export const legacyNodeInk = "#f5f5f5";
+
+export function resolveNodeInk(textColor: string | undefined, fallback = nodeInk) {
+  if (!textColor) return fallback;
+  // Both defaults — the near-white this shipped with and the dark ink that
+  // replaced it — mean "no choice was made", so they defer to the theme. Only
+  // then does a light document stay readable after a switch to dark, and the
+  // other way round.
+  const key = textColor.toLowerCase();
+  return key === legacyNodeInk || key === nodeInk ? fallback : textColor;
+}
+
+/** Readable ink for arbitrary artwork backgrounds, used by the SVG export. */
+export function inkFor(background: string) {
+  const dark = { strong: "#f5f5f5", muted: "#888888" };
+  const light = { strong: nodeInk, muted: "#64748b" };
+  const hex = background.replace("#", "");
+  if (hex.length < 6) return light;
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  return luminance > 0.5 ? light : dark;
 }

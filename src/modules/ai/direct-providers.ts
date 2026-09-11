@@ -114,7 +114,39 @@ Rules that matter:
 - Use edge semantics honestly: request for synchronous calls, event for fire-and-forget, data for persistence and reads, feedback for callbacks, success and failure for branch outcomes.
 - Keep labels short. A node label is a name, not a sentence. detail is at most six words.
 - Node ids are lowercase slugs and every edge from/to must match one.
-- Prefer 5 to 12 nodes. Merge detail into fewer nodes rather than sprawling.`;
+- Prefer 5 to 12 nodes. Merge detail into fewer nodes rather than sprawling.
+
+Flowcharts and algorithms:
+When the request is a procedure, an algorithm or a decision flow rather than a
+system architecture, use mode "flow" and the flowchart roles. They carry the
+house style, which the renderer paints for you — you never emit a colour:
+- start and end — the entry and exit of the procedure. Both render green.
+- decision — any branch or condition. Renders as an orange diamond.
+- process — a computation or transformation step. Renders light blue.
+- input-output — where a result is produced or handed back. Renders light violet.
+Leave every other role for the things they actually name (subprocess, delay,
+manual-input, stored-data, document, merge).
+
+Every decision node must have exactly two outgoing edges, one with semantics
+"success" and one with "failure", and each one labelled with the condition it
+takes — "yes"/"no", or the comparison itself. A branch whose arms are not
+labelled is unreadable.
+
+Keeping the picture clean:
+- Connectors must not cross. The layout orders nodes by what they connect to, so
+  you keep it solvable: emit the nodes in the order they are reached, connect
+  each node to the next one in that order, and do not jump backwards or skip
+  ahead unless the logic truly loops.
+- One idea per node. A node that needs "and" in its label is two nodes.
+- Do not fan more than three edges out of a single node.
+
+Mathematics:
+Write formulas in LaTeX between dollar signs and they are typeset properly:
+"$x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$" in a label or detail renders as real
+mathematics. Use $...$ for anything with a fraction, root, exponent, subscript,
+sum or integral — never fake it with slashes or ^ in plain text, and never
+describe a formula in words when you can write it. Escape a literal dollar sign
+as \\$.`;
 
 // -------------------------------------------------------------------- utils
 

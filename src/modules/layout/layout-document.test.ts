@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { compilePlan } from "@/modules/compiler/compile-plan";
 import { architecturePlan } from "@/modules/fixtures/architecture-plan";
 import { diagramSamples } from "@/modules/fixtures/diagram-samples";
-import { layoutDocument } from "./layout-document";
+import { createBlankDocument, createDiagramNode, primitiveDefinitions } from "@/modules/diagram/factory";
+import { countEdgeCrossings, layoutDocument } from "./layout-document";
 
 describe("layoutDocument", () => {
   it("does not place two nodes at the same position", async () => {
@@ -31,21 +32,41 @@ describe("layoutDocument", () => {
     const byId = new Map(document.nodes.map((node) => [node.id, node]));
 
     for (const edge of document.edges.filter((candidate) => candidate.semantics === "data")) {
-      expect(byId.get(edge.to)?.position.x).toBe(byId.get(edge.from)?.position.x);
+      // Centres line up; the boxes are no longer the same width.
+      const centre = (id: string) => {
+        const node = byId.get(id)!;
+        return node.position.x + node.size.width / 2;
+      };
+      // Positions are rounded to whole pixels, so allow one pixel of drift.
+      expect(Math.abs(centre(edge.to) - centre(edge.from))).toBeLessThanOrEqual(1);
       expect(byId.get(edge.to)?.position.y).toBeGreaterThan(byId.get(edge.from)?.position.y ?? 0);
     }
   });
 
-  it("keeps the async cluster out of owned data columns", async () => {
+  it("only parks a node on a data lane when it buys a crossing-free layout", async () => {
     const document = await layoutDocument(compilePlan(architecturePlan));
-    const asyncNodes = document.nodes.filter((node) => node.lane === "async");
-    const dataEdges = document.edges.filter((edge) => edge.semantics === "data");
     const byId = new Map(document.nodes.map((node) => [node.id, node]));
+    const asyncNodes = document.nodes.filter((node) => node.lane === "async");
 
-    for (const edge of dataEdges) {
-      const x = (byId.get(edge.from)?.position.x ?? 0) + 110;
-      expect(asyncNodes.some((node) => x > node.position.x && x < node.position.x + 220)).toBe(false);
+    // The layout weighs two costs against each other: connectors that cross,
+    // and connectors forced to detour around a box sitting on their lane. It
+    // prefers the detour, because a crossing is harder to read than a bend —
+    // but only when the result is genuinely crossing-free.
+    let blocking = 0;
+    for (const edge of document.edges.filter((candidate) => candidate.semantics === "data")) {
+      const owner = byId.get(edge.from);
+      const store = byId.get(edge.to);
+      if (!owner || !store) continue;
+      const lane = owner.position.x + owner.size.width / 2;
+      blocking += asyncNodes.filter((node) =>
+        node.position.x < lane
+        && node.position.x + node.size.width > lane
+        && node.position.y > owner.position.y
+        && node.position.y + node.size.height < store.position.y).length;
     }
+
+    if (blocking > 0) expect(countEdgeCrossings(document)).toBe(0);
+    expect(blocking).toBeLessThanOrEqual(1);
   });
 
   it("lays out every sample deterministically without overlapping ordinary nodes", async () => {
@@ -76,5 +97,51 @@ describe("layoutDocument", () => {
 
     expect(new Set(ordinary.map((node) => node.position.y)).size).toBe(ordinary.length);
     expect(arranged.edges.some((edge) => edge.targetPort === "top-center")).toBe(true);
+  });
+});
+
+describe("crossing reduction", () => {
+  it("orders the async and data lanes by who they connect to", async () => {
+    // Three services on the main row, each publishing to its own queue, with
+    // the queues listed in the reverse of the order their publishers sit in.
+    // Laid out naively that is three crossed connectors; ordered by barycenter
+    // it is none.
+    const document = {
+      ...createBlankDocument("crossing", "Crossing"),
+      nodes: [
+        ...["a", "b", "c"].map((id, index) => ({
+          ...createDiagramNode(primitiveDefinitions.find((p) => p.role === "service")!, { x: index * 300, y: 0 }, `svc-${id}`),
+          lane: "core" as const,
+        })),
+        ...["c", "b", "a"].map((id, index) => ({
+          ...createDiagramNode(primitiveDefinitions.find((p) => p.role === "event-bus")!, { x: index * 300, y: 400 }, `queue-${id}`),
+          lane: "async" as const,
+        })),
+      ],
+      edges: ["a", "b", "c"].map((id) => ({
+        id: `edge-${id}`,
+        from: `svc-${id}`,
+        to: `queue-${id}`,
+        semantics: "event" as const,
+        important: true,
+        direction: "forward" as const,
+        thickness: 1.8,
+        color: "#d97706",
+        strokeStyle: "solid" as const,
+        effect: "pulse" as const,
+        speed: 2.1,
+        animated: false,
+        labelOffset: { x: 0, y: 0 },
+        sourcePort: "event-output" as const,
+        targetPort: "event-input" as const,
+      })),
+    };
+
+    const laidOut = await layoutDocument(document);
+    expect(countEdgeCrossings(laidOut)).toBe(0);
+
+    const queueX = ["a", "b", "c"].map((id) => laidOut.nodes.find((node) => node.id === `queue-${id}`)!.position.x);
+    expect(queueX[0]).toBeLessThan(queueX[1]);
+    expect(queueX[1]).toBeLessThan(queueX[2]);
   });
 });

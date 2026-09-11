@@ -1,4 +1,5 @@
-import { roleColors } from "@/modules/catalog/catalog";
+import { diagramTheme, edgeColor, roleColors } from "@/modules/catalog/catalog";
+import { widthForLabel } from "@/modules/diagram/label-metrics";
 import {
   diagramPlanSchema,
   type DiagramDocument,
@@ -51,7 +52,7 @@ function compileEdge(
   lanes: Map<string, DiagramPlan["nodes"][number]["lane"]>,
   fanoutIndex: number,
 ): DiagramEdge {
-  const color = edge.color ?? (edge.semantics === "event" ? "#fbbf24" : edge.semantics === "data" || edge.semantics === "feedback" ? "#a78bfa" : edge.semantics === "failure" ? "#fb7185" : "#b6ff5c");
+  const color = edge.color ?? edgeColor(edge.semantics);
   const visual = {
     direction: edge.direction ?? "forward",
     thickness: edge.thickness ?? (edge.important ? 1.8 : 1.2),
@@ -113,12 +114,12 @@ export function compilePlan(input: DiagramPlan): DiagramDocument {
       effect: node.effect ?? nodeEffect(node.role),
       // Async work reads better a touch quicker than the synchronous path.
       speed: node.speed ?? (node.lane === "async" ? 2.6 : 2.1),
-      size: node.role === "zone" ? { width: 520, height: 300 } : node.role === "group" ? { width: 440, height: 260 } : node.role === "text" ? { width: 240, height: 72 } : node.role === "note" ? { width: 240, height: 136 } : { width: 220, height: 104 },
+      size: node.role === "zone" ? { width: 520, height: 300 } : node.role === "group" ? { width: 440, height: 260 } : node.role === "text" ? { width: 240, height: 72 } : node.role === "note" ? { width: 240, height: 136 } : { width: widthForLabel(node.label, node.detail), height: 104 },
       labelPosition: node.role === "zone" || node.role === "group" ? { side: "top", offset: 0.16 } : undefined,
       ports: defaultPorts,
       position: { x: 0, y: 0 },
     })),
     edges: plan.edges.map((edge) => compileEdge(edge, lanes, fanoutIndexes.get(edge.id) ?? 0)),
-    theme: { background: "#080808", accent: "#b6ff5c" },
+    theme: { ...diagramTheme },
   };
 }

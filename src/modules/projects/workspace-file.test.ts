@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { nodeInk } from "@/modules/catalog/catalog";
 import { compilePlan } from "@/modules/compiler/compile-plan";
 import { architecturePlan } from "@/modules/fixtures/architecture-plan";
 import { parseWorkspaceFile, serializeWorkspaceFile } from "./workspace-file";
@@ -54,6 +55,6 @@ describe("workspace file", () => {
 
     const imported = parseWorkspaceFile(serializeWorkspaceFile(document));
 
-    expect(imported.nodes[0]).toMatchObject({ textColor: "#f5f5f5", fontFamily: "geist-mono", fontSize: 14, fontWeight: 700, textAlign: "left" });
+    expect(imported.nodes[0]).toMatchObject({ textColor: nodeInk, fontFamily: "geist-mono", fontSize: 14, fontWeight: 700, textAlign: "left" });
   });
 });

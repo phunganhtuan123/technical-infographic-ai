@@ -14,6 +14,15 @@ type RouteInput = {
   waypoint?: RoutePoint;
   waypoints?: RoutePoint[];
   offset?: number;
+  /**
+   * How far to run straight out of the anchor before turning.
+   *
+   * Two connectors leaving the same anchor towards boxes on the same row share
+   * every lane the router can pick, and are drawn as one line. Giving each a
+   * different lead makes them turn at different distances, so they separate
+   * immediately after the anchor instead of somewhere near the far end.
+   */
+  portLead?: number;
 };
 
 function lead(point: RoutePoint, position: Position, distance: number): RoutePoint {
@@ -135,9 +144,9 @@ function endpointDirectionsValid(points: RoutePoint[]) {
   return !sourceReverses && !targetReverses;
 }
 
-export function routeOrthogonal({ source, target, sourcePosition, targetPosition, obstacles, protectedObstacles = [], waypoint, waypoints, offset = 16 }: RouteInput) {
+export function routeOrthogonal({ source, target, sourcePosition, targetPosition, obstacles, protectedObstacles = [], waypoint, waypoints, offset = 16, portLead: lead_ = 14 }: RouteInput) {
   const clearance = 8;
-  const portLead = 14;
+  const portLead = lead_;
   const expanded = obstacles.map((obstacle) => ({ x: obstacle.x - clearance, y: obstacle.y - clearance, width: obstacle.width + clearance * 2, height: obstacle.height + clearance * 2 }));
   const blocked = [...expanded, ...protectedObstacles];
   const start = lead(source, sourcePosition, portLead);

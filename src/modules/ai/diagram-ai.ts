@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { roleColors } from "@/modules/catalog/catalog";
+import { edgeColor, roleColors } from "@/modules/catalog/catalog";
 import { defaultNodeTypography, defaultPorts, findAvailablePosition } from "@/modules/diagram/factory";
 import {
   diagramPlanSchema,
@@ -96,7 +96,7 @@ export function applyPlan(document: DiagramDocument, input: DiagramPlan): Diagra
         ...edge,
         direction: edge.direction ?? existing?.direction ?? "forward",
         thickness: edge.thickness ?? existing?.thickness ?? (edge.important ? 1.8 : 1.2),
-        color: edge.color ?? existing?.color ?? (edge.semantics === "event" ? "#fbbf24" : edge.semantics === "data" || edge.semantics === "feedback" ? "#a78bfa" : edge.semantics === "failure" ? "#fb7185" : "#b6ff5c"),
+        color: edge.color ?? existing?.color ?? edgeColor(edge.semantics),
         strokeStyle: edge.strokeStyle ?? existing?.strokeStyle ?? (edge.semantics === "event" || edge.semantics === "feedback" ? "dashed" : "solid"),
         effect: edge.effect ?? existing?.effect ?? "pulse",
         speed: edge.speed ?? existing?.speed ?? (edge.semantics === "event" ? 2.7 : 2.1),

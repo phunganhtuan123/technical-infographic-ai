@@ -1,6 +1,8 @@
 import type { DiagramDocument, DiagramNode, DiagramPort } from "@/modules/diagram/schema";
-import { technologyDetails } from "@/modules/catalog/catalog";
+import { diagramTheme, inkFor, resolveEdgeColor, resolveNodeColor, resolveNodeInk, technologyDetails } from "@/modules/catalog/catalog";
 import { routeOrthogonal } from "@/modules/canvas/orthogonal-router";
+import { mathToPlainText } from "@/modules/diagram/math-text";
+import { fitLabel, wrapLabel } from "@/modules/diagram/label-metrics";
 import { Position } from "@xyflow/react";
 import { GIFEncoder, applyPalette, quantize } from "gifenc";
 import { serializeWorkspaceFile } from "@/modules/projects/workspace-file";
@@ -73,7 +75,23 @@ function containerLabelCoordinates(node: DiagramNode, width: number, height: num
   return { x: width * offset, y: 0, anchor: "middle", rotate: 0 };
 }
 
-function nodeTypography(node: DiagramNode, width: number) {
+
+
+/** A node label as <tspan> lines, centred on the first baseline. */
+function labelLines(text: string, boxWidth: number, fontSize: number, x: number, y: number, anchor: string, extra: string) {
+  const lines = wrapLabel(text, boxWidth, fontSize);
+  if (lines.length === 1) {
+    return `<text x="${x}" y="${y}" text-anchor="${anchor}"${extra}>${escapeXml(lines[0])}</text>`;
+  }
+  // Lift the block so a two-line label stays centred where one line sat.
+  const step = Math.round(fontSize * 1.15);
+  const top = y - Math.round(step / 2);
+  return `<text x="${x}" y="${top}" text-anchor="${anchor}"${extra}>${lines
+    .map((line, index) => `<tspan x="${x}" dy="${index === 0 ? 0 : step}">${escapeXml(line)}</tspan>`)
+    .join("")}</text>`;
+}
+
+function nodeTypography(node: DiagramNode, width: number, sheetInk: string) {
   const family = node.fontFamily === "system-sans" ? "Inter,ui-sans-serif,sans-serif"
     : node.fontFamily === "jetbrains-mono" ? "JetBrains Mono,ui-monospace,monospace"
       : node.fontFamily === "ibm-plex-mono" ? "IBM Plex Mono,ui-monospace,monospace"
@@ -84,7 +102,7 @@ function nodeTypography(node: DiagramNode, width: number) {
     family,
     size: node.fontSize ?? (node.role === "text" ? 18 : node.role === "note" ? 13 : 14),
     weight: node.fontWeight ?? 700,
-    color: node.textColor ?? "#f5f5f5",
+    color: resolveNodeInk(node.textColor, sheetInk),
     anchor: align === "center" ? "middle" : align === "right" ? "end" : "start",
     x: align === "center" ? width / 2 : align === "right" ? width - inset : inset,
   };
@@ -168,6 +186,17 @@ function nodeAnimation(node: DiagramNode, width: number, height: number, options
 export function renderDocumentSvg(document: DiagramDocument, options: SvgRenderOptions = { animate: true }) {
   const renderOptions = { animate: options.animate ?? true, animationTime: options.animationTime };
   const bounds = dimensions(document);
+  // The export follows the document's own theme rather than assuming the black
+  // canvas this used to ship with, so a light diagram exports light.
+  const canvas = document.theme?.background ?? diagramTheme.background;
+  const ink = inkFor(canvas);
+  // Resolve legacy palette entries once, up front, so every one of the drawing
+  // branches below reads an already-current colour.
+  document = {
+    ...document,
+    nodes: document.nodes.map((node) => ({ ...node, color: resolveNodeColor(node.color, node.role) })),
+    edges: document.edges.map((edge) => ({ ...edge, color: resolveEdgeColor(edge.color, edge.semantics) })),
+  };
   const nodes = new Map(document.nodes.map((node) => [node.id, node]));
   const edges = document.edges.map((edge, edgeIndex) => {
     const from = nodes.get(edge.from);
@@ -203,10 +232,10 @@ export function renderDocumentSvg(document: DiagramDocument, options: SvgRenderO
     const markerStart = edge.direction === "reverse" || edge.direction === "both" ? ` marker-start="url(#${marker})"` : "";
     const markerEnd = edge.direction === "forward" || edge.direction === "both" ? ` marker-end="url(#${marker})"` : "";
     const captionWidth = Math.max(42, (edge.label?.length ?? 0) * 5.2 + 16);
-    const caption = edge.label ? `<g transform="translate(${route.labelX + (edge.labelOffset?.x ?? 0)} ${route.labelY + (edge.labelOffset?.y ?? 0)})"><rect x="${-captionWidth / 2}" y="-11" width="${captionWidth}" height="22" rx="11" fill="#0c0c0c" stroke="${color}"/><text y="3" text-anchor="middle" fill="${color}" font-size="8">${escapeXml(edge.label)}</text></g>` : "";
+    const caption = edge.label ? `<g transform="translate(${route.labelX + (edge.labelOffset?.x ?? 0)} ${route.labelY + (edge.labelOffset?.y ?? 0)})"><rect x="${-captionWidth / 2}" y="-11" width="${captionWidth}" height="22" rx="11" fill="${canvas}" stroke="${color}"/><text y="3" text-anchor="middle" fill="${color}" font-size="8">${escapeXml(edge.label)}</text></g>` : "";
     const dash = edge.strokeStyle === "dashed" ? ` stroke-dasharray="8 7"` : edge.strokeStyle === "dotted" ? ` stroke-dasharray="1 7" stroke-linecap="round"` : "";
     const animation = edgeAnimation(edge, route, renderOptions);
-    return `<defs><marker id="${marker}" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 Z" fill="${color}"/></marker></defs><path d="${route.path}" fill="none" stroke="#080808" stroke-width="${edge.thickness + 8}" stroke-linecap="round" stroke-linejoin="round"/><path d="${route.path}" fill="none" stroke="${color}" stroke-width="${edge.thickness}" stroke-opacity=".72" stroke-linecap="round" stroke-linejoin="round"${dash}${markerStart}${markerEnd}/>${animation}${caption}`;
+    return `<defs><marker id="${marker}" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 Z" fill="${color}"/></marker></defs><path d="${route.path}" fill="none" stroke="${canvas}" stroke-width="${edge.thickness + 8}" stroke-linecap="round" stroke-linejoin="round"/><path d="${route.path}" fill="none" stroke="${color}" stroke-width="${edge.thickness}" stroke-opacity=".72" stroke-linecap="round" stroke-linejoin="round"${dash}${markerStart}${markerEnd}/>${animation}${caption}`;
   }).join("");
   const cards = [...document.nodes].sort((left, right) => {
     const layer = (node: DiagramNode) => node.zIndex ?? (node.role === "zone" ? -2 : node.role === "group" ? -1 : 1);
@@ -218,35 +247,35 @@ export function renderDocumentSvg(document: DiagramDocument, options: SvgRenderO
     const scaleY = height / nodeHeight;
     const technology = technologyDetails(node.technology);
     const shape = flowShapePaths[node.role];
-    const typography = nodeTypography(node, node.role === "text" || node.role === "note" || node.role === "zone" || node.role === "group" ? width : nodeWidth);
+    const typography = nodeTypography(node, node.role === "text" || node.role === "note" || node.role === "zone" || node.role === "group" ? width : nodeWidth, ink.strong);
     const secondarySize = Math.max(8, Math.round(typography.size * 0.62));
     const dash = node.borderStyle === "dashed" ? ` stroke-dasharray="8 6"` : node.borderStyle === "dotted" ? ` stroke-dasharray="1 7" stroke-linecap="round"` : "";
     if (node.role === "zone" || node.role === "group") {
       const label = containerLabelCoordinates(node, width, height);
-      return `<g transform="translate(${node.position.x} ${node.position.y})"><rect width="${width}" height="${height}" rx="14" fill="${node.color}" fill-opacity=".025" stroke="${node.color}" stroke-opacity=".48" stroke-width="${node.borderWidth}" stroke-dasharray="8 7"/>${nodeAnimation(node, width, height, renderOptions)}<g transform="translate(${label.x} ${label.y}) rotate(${label.rotate})"><rect x="-52" y="-12" width="104" height="24" rx="6" fill="#080808" stroke="${node.color}" stroke-opacity=".54"/><text y="4" text-anchor="${label.anchor}" fill="${typography.color}" font-family="${typography.family}" font-size="${typography.size}" font-weight="${typography.weight}">${escapeXml(node.label.slice(0, 22))}</text></g></g>`;
+      return `<g transform="translate(${node.position.x} ${node.position.y})"><rect width="${width}" height="${height}" rx="14" fill="${node.color}" fill-opacity=".025" stroke="${node.color}" stroke-opacity=".48" stroke-width="${node.borderWidth}" stroke-dasharray="8 7"/>${nodeAnimation(node, width, height, renderOptions)}<g transform="translate(${label.x} ${label.y}) rotate(${label.rotate})"><rect x="-52" y="-12" width="104" height="24" rx="6" fill="${canvas}" stroke="${node.color}" stroke-opacity=".54"/><text y="4" text-anchor="${label.anchor}" fill="${typography.color}" font-family="${typography.family}" font-size="${typography.size}" font-weight="${typography.weight}">${escapeXml(fitLabel(mathToPlainText(node.label), width, typography.size))}</text></g></g>`;
     }
     if (node.role === "text") {
-      return `<g transform="translate(${node.position.x} ${node.position.y})" font-family="${typography.family}"><text x="${typography.x}" y="${typography.size + 4}" text-anchor="${typography.anchor}" fill="${typography.color}" font-size="${typography.size}" font-weight="${typography.weight}">${escapeXml(node.label.slice(0, 42))}</text>${node.detail ? `<text x="${typography.x}" y="${typography.size + 28}" text-anchor="${typography.anchor}" fill="${typography.color}" fill-opacity=".62" font-size="${secondarySize}">${escapeXml(node.detail.slice(0, 68))}</text>` : ""}${nodeAnimation(node, width, height, renderOptions)}</g>`;
+      return `<g transform="translate(${node.position.x} ${node.position.y})" font-family="${typography.family}"><text x="${typography.x}" y="${typography.size + 4}" text-anchor="${typography.anchor}" fill="${typography.color}" font-size="${typography.size}" font-weight="${typography.weight}">${escapeXml(fitLabel(mathToPlainText(node.label), width, typography.size))}</text>${node.detail ? `<text x="${typography.x}" y="${typography.size + 28}" text-anchor="${typography.anchor}" fill="${typography.color}" fill-opacity=".62" font-size="${secondarySize}">${escapeXml(fitLabel(mathToPlainText(node.detail), width, secondarySize))}</text>` : ""}${nodeAnimation(node, width, height, renderOptions)}</g>`;
     }
     if (node.role === "note") {
-      return `<g transform="translate(${node.position.x} ${node.position.y})" font-family="${typography.family}"><rect width="${width}" height="${height}" rx="10" fill="${node.color}" fill-opacity=".07" stroke="${node.color}" stroke-opacity=".46" stroke-width="${node.borderWidth}"${dash}/><rect x="0" y="0" width="3" height="${height}" rx="1.5" fill="${node.color}"/><text x="18" y="25" fill="${node.color}" font-size="9" letter-spacing="1">NOTE</text><text x="${typography.x}" y="58" text-anchor="${typography.anchor}" fill="${typography.color}" font-size="${typography.size}" font-weight="${typography.weight}">${escapeXml(node.label.slice(0, 28))}</text>${node.detail ? `<text x="${typography.x}" y="82" text-anchor="${typography.anchor}" fill="${typography.color}" fill-opacity=".62" font-size="${secondarySize}">${escapeXml(node.detail.slice(0, 46))}</text>` : ""}${nodeAnimation(node, width, height, renderOptions)}</g>`;
+      return `<g transform="translate(${node.position.x} ${node.position.y})" font-family="${typography.family}"><rect width="${width}" height="${height}" rx="10" fill="${node.color}" fill-opacity=".07" stroke="${node.color}" stroke-opacity=".46" stroke-width="${node.borderWidth}"${dash}/><rect x="0" y="0" width="3" height="${height}" rx="1.5" fill="${node.color}"/><text x="18" y="25" fill="${node.color}" font-size="9" letter-spacing="1">NOTE</text><text x="${typography.x}" y="58" text-anchor="${typography.anchor}" fill="${typography.color}" font-size="${typography.size}" font-weight="${typography.weight}">${escapeXml(fitLabel(mathToPlainText(node.label), width, typography.size))}</text>${node.detail ? `<text x="${typography.x}" y="82" text-anchor="${typography.anchor}" fill="${typography.color}" fill-opacity=".62" font-size="${secondarySize}">${escapeXml(fitLabel(mathToPlainText(node.detail), width, secondarySize))}</text>` : ""}${nodeAnimation(node, width, height, renderOptions)}</g>`;
     }
     const cardShape = shape
-      ? `<path d="${shape}" fill="#111111" stroke="${node.color}" stroke-opacity=".58" stroke-width="${node.borderWidth}"${dash}/>`
-      : `<rect width="${nodeWidth}" height="${nodeHeight}" rx="12" fill="#111111" stroke="${node.color}" stroke-opacity=".48" stroke-width="${node.borderWidth}"${dash}/>`;
+      ? `<path d="${shape}" fill="${node.color}" fill-opacity=".08" stroke="${node.color}" stroke-opacity=".58" stroke-width="${node.borderWidth}"${dash}/>`
+      : `<rect width="${nodeWidth}" height="${nodeHeight}" rx="12" fill="${node.color}" fill-opacity=".08" stroke="${node.color}" stroke-opacity=".48" stroke-width="${node.borderWidth}"${dash}/>`;
     const clipId = `node-clip-${node.id.replace(/[^a-z0-9_-]/gi, "-")}`;
     const clipShape = shape ? `<path d="${shape}"/>` : `<rect width="${nodeWidth}" height="${nodeHeight}" rx="12"/>`;
     const background = node.backgroundImage ? `<defs><clipPath id="${clipId}">${clipShape}</clipPath></defs><image href="${escapeXml(node.backgroundImage)}" width="${nodeWidth}" height="${nodeHeight}" opacity="${node.backgroundOpacity ?? 0.28}" preserveAspectRatio="xMidYMid ${node.backgroundFit === "contain" ? "meet" : "slice"}" clip-path="url(#${clipId})"/>` : "";
     const technologyMark = technology ? `<g transform="translate(184 10)"><rect width="26" height="26" rx="7" fill="${technology.color}" fill-opacity=".08" stroke="${technology.color}" stroke-opacity=".48"/><text x="13" y="17" text-anchor="middle" fill="${technology.color}" font-size="7" font-weight="700">${technology.badge}</text></g>` : "";
     const content = shape ? `
       <text x="110" y="31" text-anchor="middle" fill="${node.color}" fill-opacity=".82" font-size="8" letter-spacing="1">${escapeXml(node.role.toUpperCase())}</text>
-      <text x="${typography.x}" y="57" text-anchor="${typography.anchor}" fill="${typography.color}" font-family="${typography.family}" font-size="${typography.size}" font-weight="${typography.weight}">${escapeXml(node.label.slice(0, 22))}</text>
-      <text x="${typography.x}" y="78" text-anchor="${typography.anchor}" fill="${typography.color}" fill-opacity=".58" font-family="${typography.family}" font-size="${secondarySize}">${escapeXml((node.detail ?? "flow step").slice(0, 28))}</text>` : `
+      ${labelLines(mathToPlainText(node.label), width, typography.size, typography.x, 57, typography.anchor, ` fill="${typography.color}" font-family="${typography.family}" font-size="${typography.size}" font-weight="${typography.weight}"`)}
+      <text x="${typography.x}" y="78" text-anchor="${typography.anchor}" fill="${typography.color}" fill-opacity=".58" font-family="${typography.family}" font-size="${secondarySize}">${escapeXml(fitLabel(mathToPlainText(node.detail ?? "flow step"), nodeWidth, secondarySize))}</text>` : `
       <rect x="15" width="44" height="2" rx="1" fill="${node.color}" fill-opacity=".7"/>
       <text x="16" y="24" fill="${node.color}" fill-opacity=".8" font-size="9" letter-spacing="1.2">${escapeXml(node.role.toUpperCase())}</text>
       ${technologyMark || `<circle cx="202" cy="20" r="3" fill="${node.color}"/>`}
-      <text x="${typography.x}" y="60" text-anchor="${typography.anchor}" fill="${typography.color}" font-family="${typography.family}" font-size="${typography.size}" font-weight="${typography.weight}">${escapeXml(node.label.slice(0, 26))}</text>
-      <text x="${typography.x}" y="85" text-anchor="${typography.anchor}" fill="${typography.color}" fill-opacity=".58" font-family="${typography.family}" font-size="${secondarySize}">${escapeXml((node.detail ?? node.technology ?? "system component").slice(0, 34))}</text>`;
+      ${labelLines(mathToPlainText(node.label), nodeWidth, typography.size, typography.x, 60, typography.anchor, ` fill="${typography.color}" font-family="${typography.family}" font-size="${typography.size}" font-weight="${typography.weight}"`)}
+      <text x="${typography.x}" y="85" text-anchor="${typography.anchor}" fill="${typography.color}" fill-opacity=".58" font-family="${typography.family}" font-size="${secondarySize}">${escapeXml(fitLabel(mathToPlainText(node.detail ?? node.technology ?? "system component"), nodeWidth, secondarySize))}</text>`;
     return `
     <g transform="translate(${node.position.x} ${node.position.y})">
       <g transform="scale(${scaleX} ${scaleY})">
@@ -255,15 +284,15 @@ export function renderDocumentSvg(document: DiagramDocument, options: SvgRenderO
       ${content}
       ${nodeAnimation(node, nodeWidth, nodeHeight, renderOptions, shape)}
       </g>
-      ${node.caption ? `<text x="${typography.x / nodeWidth * width}" y="${height + 16}" text-anchor="${typography.anchor}" fill="${typography.color}" fill-opacity=".48" font-family="${typography.family}" font-size="${secondarySize}">${escapeXml(node.caption.slice(0, 42))}</text>` : ""}
-      ${node.note ? `<text x="${typography.x / nodeWidth * width}" y="${height + (node.caption ? 32 : 16)}" text-anchor="${typography.anchor}" fill="${typography.color}" fill-opacity=".42" font-family="${typography.family}" font-size="${Math.max(8, secondarySize - 1)}">${escapeXml(node.note.slice(0, 48))}</text>` : ""}
+      ${node.caption ? `<text x="${typography.x / nodeWidth * width}" y="${height + 16}" text-anchor="${typography.anchor}" fill="${typography.color}" fill-opacity=".48" font-family="${typography.family}" font-size="${secondarySize}">${escapeXml(mathToPlainText(node.caption).slice(0, 42))}</text>` : ""}
+      ${node.note ? `<text x="${typography.x / nodeWidth * width}" y="${height + (node.caption ? 32 : 16)}" text-anchor="${typography.anchor}" fill="${typography.color}" fill-opacity=".42" font-family="${typography.family}" font-size="${Math.max(8, secondarySize - 1)}">${escapeXml(mathToPlainText(node.note).slice(0, 48))}</text>` : ""}
     </g>`;
   }).join("");
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(bounds.width)}" height="${Math.round(bounds.height)}" viewBox="${bounds.minX} ${bounds.minY} ${bounds.width} ${bounds.height}">
-  <rect x="${bounds.minX}" y="${bounds.minY}" width="${bounds.width}" height="${bounds.height}" fill="#080808"/>
-  <text x="${bounds.minX + padding}" y="${bounds.minY + 34}" fill="#f5f5f5" font-family="ui-monospace,monospace" font-size="22" font-weight="650">${escapeXml(document.title)}</text>
-  <text x="${bounds.minX + padding}" y="${bounds.minY + 54}" fill="#888888" font-family="ui-monospace,monospace" font-size="10">${escapeXml(document.purpose.slice(0, 120))}</text>
+  <rect x="${bounds.minX}" y="${bounds.minY}" width="${bounds.width}" height="${bounds.height}" fill="${canvas}"/>
+  <text x="${bounds.minX + padding}" y="${bounds.minY + 34}" fill="${ink.strong}" font-family="ui-monospace,monospace" font-size="22" font-weight="650">${escapeXml(mathToPlainText(document.title))}</text>
+  <text x="${bounds.minX + padding}" y="${bounds.minY + 54}" fill="${ink.muted}" font-family="ui-monospace,monospace" font-size="10">${escapeXml(mathToPlainText(document.purpose).slice(0, 120))}</text>
   <g font-family="ui-monospace,monospace">${edges}${cards}</g>
   </svg>`;
 }
@@ -289,7 +318,8 @@ export async function exportSvg(document: DiagramDocument) {
 export async function exportHtml(document: DiagramDocument) {
   const ready = await inlineAssets(document);
   const svg = renderDocumentSvg(ready);
-  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeXml(ready.title)}</title><style>html,body{margin:0;background:#080808;display:grid;place-items:center;min-height:100%;overflow:hidden}svg{width:100%;height:100%;max-width:100vw;max-height:100vh}</style></head><body>${svg}</body></html>`;
+  const canvas = ready.theme?.background ?? diagramTheme.background;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeXml(ready.title)}</title><style>html,body{margin:0;background:${canvas};display:grid;place-items:center;min-height:100%;overflow:hidden}svg{width:100%;height:100%;max-width:100vw;max-height:100vh}</style></head><body>${svg}</body></html>`;
   download(new Blob([html], { type: "text/html" }), `${ready.id}.html`);
 }
 
@@ -375,15 +405,43 @@ export async function exportGif(document: DiagramDocument) {
   download(new Blob([payload], { type: "image/gif" }), `${ready.id}.gif`);
 }
 
-function supportedVideoMimeType() {
-  const candidates = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
-  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate));
+export type VideoFormat = "webm" | "mp4";
+
+/**
+ * Codecs to try for each container, best first.
+ *
+ * MP4 recording is browser-side and recent: Safari has had it for a while,
+ * Chrome only since 126, and Firefox does not do it at all. There is no
+ * transcoding fallback here — re-encoding VP9 to H.264 in the page would cost
+ * more than the export is worth — so a browser that cannot record MP4 is told
+ * so plainly rather than handed a file with the wrong contents.
+ */
+const videoCandidates: Record<VideoFormat, string[]> = {
+  webm: ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"],
+  mp4: ["video/mp4;codecs=avc1.42E01E", "video/mp4;codecs=avc1", "video/mp4;codecs=h264", "video/mp4"],
+};
+
+function supportedVideoMimeType(format: VideoFormat) {
+  if (typeof MediaRecorder === "undefined") return undefined;
+  return videoCandidates[format].find((candidate) => MediaRecorder.isTypeSupported(candidate));
 }
 
-export async function exportVideo(document: DiagramDocument) {
+/** Which of the offered formats this browser can actually record. */
+export function videoFormatSupport(): Record<VideoFormat, boolean> {
+  return {
+    webm: Boolean(supportedVideoMimeType("webm")),
+    mp4: Boolean(supportedVideoMimeType("mp4")),
+  };
+}
+
+export async function exportVideo(document: DiagramDocument, format: VideoFormat = "webm") {
   if (typeof MediaRecorder === "undefined") throw new Error("Video export is not supported by this browser");
-  const mimeType = supportedVideoMimeType();
-  if (!mimeType) throw new Error("This browser cannot encode WebM video");
+  const mimeType = supportedVideoMimeType(format);
+  if (!mimeType) {
+    throw new Error(format === "mp4"
+      ? "This browser cannot record MP4. Chrome 126+ or Safari can; otherwise export WebM."
+      : "This browser cannot encode WebM video");
+  }
   const ready = await inlineAssets(document);
   const size = rasterDimensions(ready, 1920);
   const canvas = window.document.createElement("canvas");
@@ -409,7 +467,7 @@ export async function exportVideo(document: DiagramDocument) {
     }
     recorder.stop();
     await stopped;
-    download(new Blob(chunks, { type: mimeType }), `${ready.id}.webm`);
+    download(new Blob(chunks, { type: mimeType }), `${ready.id}.${format}`);
   } finally {
     stream.getTracks().forEach((track) => track.stop());
     if (recorder.state !== "inactive") recorder.stop();

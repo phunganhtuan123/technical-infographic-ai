@@ -2,16 +2,16 @@
 
 import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { applyPlan, documentToPlan } from "@/modules/ai/diagram-ai";
-import { AiAssistantProvider, AiConnectionSettings, GlobalAiComposer, ItemCommentThread, ProposalControls, useAiAssistant } from "@/modules/ai/ai-assistant";
+import { AiAssistantProvider, AiConnectionSettings, GlobalAiComposer, ItemCommentThread, ProposalControls, aiSessionToggleEvent, aiSettingsOpenEvent, useAiAssistant } from "@/modules/ai/ai-assistant";
 import type { AiIntent, DiagramProposal } from "@/modules/ai/contracts";
 import { DiagramCanvas, primitiveDragType, type DiagramCanvasHandle } from "@/modules/canvas/diagram-canvas";
 import { ComponentIcon } from "@/modules/catalog/component-icon";
-import { brandIconsSnapshot, ensureBrandIcons, roleColors, searchBrandIcons, technologyOptions } from "@/modules/catalog/catalog";
+import { brandIconsSnapshot, ensureBrandIcons, nodeInk, resolveNodeInk, roleColors, searchBrandIcons, technologyOptions } from "@/modules/catalog/catalog";
 import { TechnologyIcon } from "@/modules/catalog/technology-icon";
 import { compilePlan } from "@/modules/compiler/compile-plan";
 import { createBlankDocument, primitiveDefinitions } from "@/modules/diagram/factory";
 import type { DiagramDocument, DiagramFormat, DiagramScene, EdgeDirection, EdgeEffect, EdgeSemantics, EdgeStrokeStyle, NodeEffect, NodeFontFamily, NodeFontWeight, NodeRole, NodeTextAlign } from "@/modules/diagram/schema";
-import { exportGif, exportHtml, exportPng, exportSvg, exportVideo, exportWorkspaceJson } from "@/modules/export/export-document";
+import { exportGif, exportHtml, exportPng, exportSvg, exportVideo, exportWorkspaceJson, videoFormatSupport, type VideoFormat } from "@/modules/export/export-document";
 import { architecturePlan } from "@/modules/fixtures/architecture-plan";
 import { diagramSamples } from "@/modules/fixtures/diagram-samples";
 import { AccountControl, AccountDialog, AiGatewayChip, ConflictDialog } from "@/modules/projects/account-panel";
@@ -19,12 +19,17 @@ import { MenuBar, type Menu, type MenuItem } from "@/modules/editor/menu-bar";
 import { uploadAsset } from "@/modules/projects/api-client";
 import { assetIdOf, assetReference, rememberAsset } from "@/modules/projects/asset-urls";
 import { HistoryDialog } from "@/modules/projects/history-panel";
+import { ImageLibrary } from "@/modules/projects/image-library";
+import { ProjectBrowser } from "@/modules/projects/project-browser";
 import { useCloudSync } from "@/modules/projects/cloud-sync";
 import { loadWorkspaceState, saveWorkspaceState } from "@/modules/projects/local-project-store";
 import { hydrateWorkspaceValue, parseWorkspaceFile } from "@/modules/projects/workspace-file";
+import { useTheme } from "@/modules/editor/theme";
 
-const colorPresets = ["#63e6ff", "#b6ff5c", "#a78bfa", "#fbbf24", "#fb7185", "#60a5fa", "#f5f5f5"];
-const textColorPresets = ["#f5f5f5", "#d4d4d4", "#a3a3a3", "#b6ff5c", "#63e6ff", "#a78bfa", "#fbbf24"];
+// Swatches for the light canvas: the flowchart convention first (green start
+// and end, orange decision, blue process, violet result), then neutrals.
+const colorPresets = ["#16a34a", "#ea580c", "#3b82f6", "#9333ea", "#0891b2", "#e11d48", "#475569"];
+const textColorPresets = [nodeInk, "#334155", "#64748b", "#4d7c0f", "#0369a1", "#6d28d9", "#b45309"];
 const fontOptions: Array<{ value: NodeFontFamily; label: string }> = [
   { value: "geist-mono", label: "Geist Mono" },
   { value: "jetbrains-mono", label: "JetBrains Mono" },
@@ -161,6 +166,16 @@ function AiStatusChip({ onOpen }: { onOpen: () => void }) {
 }
 
 export function EditorShell() {
+  const { theme, toggle: toggleTheme } = useTheme();
+  const [imageLibraryOpen, setImageLibraryOpen] = useState(false);
+  const [videoChoiceOpen, setVideoChoiceOpen] = useState(false);
+  const [projectsOpen, setProjectsOpen] = useState(false);
+
+  useEffect(() => {
+    const open = () => setConfigOpen(true);
+    window.addEventListener(aiSettingsOpenEvent, open);
+    return () => window.removeEventListener(aiSettingsOpenEvent, open);
+  }, []);
   const initialDocument = useMemo(() => normalizeWorkspace(compilePlan(architecturePlan)), []);
   const [intent, setIntent] = useState<"build" | "publish">("build");
   const [workspaces, setWorkspaces] = useState<DiagramDocument[]>([initialDocument]);
@@ -280,6 +295,38 @@ export function EditorShell() {
     setExternalRevision((value) => value + 1);
   }, []);
 
+  const openProject = useCallback((id: string) => {
+    setActiveWorkspaceId(id);
+    setSelectedNodeIds([]);
+    setSelectedEdgeIds([]);
+  }, []);
+
+  const renameProject = useCallback((id: string, title: string) => {
+    setWorkspaces((current) => current.map((workspace) =>
+      workspace.id === id ? { ...workspace, workspaceTitle: title } : workspace));
+  }, []);
+
+  const duplicateProject = useCallback((id: string) => {
+    setWorkspaces((current) => {
+      const source = current.find((workspace) => workspace.id === id);
+      if (!source) return current;
+      const copy = structuredClone(source);
+      copy.id = `workspace-${crypto.randomUUID()}`;
+      copy.workspaceTitle = `${source.workspaceTitle ?? source.title} · copy`;
+      return [...current, copy];
+    });
+  }, []);
+
+  const deleteProject = useCallback((id: string) => {
+    setWorkspaces((current) => {
+      if (current.length === 1) return current;
+      const remaining = current.filter((workspace) => workspace.id !== id);
+      setActiveWorkspaceId((active) => (active === id ? remaining[0].id : active));
+      return remaining;
+    });
+    forgetRemote(id);
+  }, [forgetRemote]);
+
   const duplicateWorkspace = useCallback(() => {
     const copy = structuredClone(document);
     copy.id = `workspace-${crypto.randomUUID()}`;
@@ -319,7 +366,7 @@ export function EditorShell() {
   }, []);
 
   const deleteWorkspace = useCallback(() => {
-    if (workspaces.length === 1 || !window.confirm(`Delete workspace “${document.workspaceTitle ?? document.title}”?`)) return;
+    if (workspaces.length === 1 || !window.confirm(`Delete project “${document.workspaceTitle ?? document.title}”?`)) return;
     const remaining = workspaces.filter((workspace) => workspace.id !== document.id);
     setWorkspaces(remaining);
     setActiveWorkspaceId(remaining[0].id);
@@ -553,13 +600,13 @@ export function EditorShell() {
     setExternalRevision((value) => value + 1);
   }, [document, updateWorkspace]);
 
-  const runAnimatedExport = useCallback(async (format: "gif" | "video") => {
+  const runAnimatedExport = useCallback(async (format: "gif" | "video", video: VideoFormat = "webm") => {
     if (exporting) return;
     setExporting(format);
-    setAiState((current) => ({ ...current, message: `Rendering ${format === "gif" ? "animated GIF" : "WebM video"}…` }));
+    setAiState((current) => ({ ...current, message: `Rendering ${format === "gif" ? "animated GIF" : `${video.toUpperCase()} video`}…` }));
     try {
       if (format === "gif") await exportGif(document);
-      else await exportVideo(document);
+      else await exportVideo(document, video);
       setAiState((current) => ({ ...current, message: `${format === "gif" ? "GIF" : "Video"} export ready` }));
     } catch (error) {
       setAiState((current) => ({ ...current, message: error instanceof Error ? error.message : "Export failed" }));
@@ -599,7 +646,7 @@ export function EditorShell() {
       command("Import PlantUML…"),
       separator,
       command("Version history…", () => setHistoryOpen(true)),
-      command("Delete workspace", deleteWorkspace, { disabled: workspaces.length === 1 }),
+      command("Delete project", deleteWorkspace, { disabled: workspaces.length === 1 }),
     ] },
     { label: "Edit", items: [
       command("Undo", () => canvasRef.current?.undo(), { hint: "⌘Z" }),
@@ -632,7 +679,7 @@ export function EditorShell() {
           { hint: String(primitives.length) })),
       separator,
       command("Background image…", () => setInspectorCollapsed(false), { disabled: selectedNodeIds.length === 0 }),
-      command("Image library…"),
+      command("Image library…", () => setImageLibraryOpen(true)),
     ] },
     { label: "AI", items: [
       heading("Gateway"),
@@ -643,7 +690,7 @@ export function EditorShell() {
       command("Generate a diagram…", () => setInspectorCollapsed(false), { hint: "⌘K" }),
       command("Explain this diagram"),
       separator,
-      command("Conversation panel", () => setConfigOpen(true)),
+      command("Conversation panel", () => window.dispatchEvent(new Event(aiSessionToggleEvent))),
     ] },
     { label: "Arrange", items: [
       command("Auto-layout", () => void canvasRef.current?.arrange(), { disabled: document.nodes.length === 0 }),
@@ -660,7 +707,7 @@ export function EditorShell() {
       command("SVG animated", () => void exportSvg(document), { disabled: Boolean(exporting) }),
       command("HTML animated", () => void exportHtml(document), { disabled: Boolean(exporting) }),
       command(exporting === "gif" ? "Rendering GIF…" : "GIF animated", () => void runAnimatedExport("gif"), { disabled: Boolean(exporting) }),
-      command(exporting === "video" ? "Recording video…" : "Video WebM", () => void runAnimatedExport("video"), { disabled: Boolean(exporting) }),
+      command(exporting === "video" ? "Recording video…" : "Video…", () => setVideoChoiceOpen(true), { disabled: Boolean(exporting) }),
       separator,
       heading("Still"),
       command("PNG 2×", () => void exportPng(document), { disabled: Boolean(exporting) }),
@@ -719,7 +766,15 @@ export function EditorShell() {
         <MenuBar menus={menus} />
         <input accept="application/json,.json" aria-label="Workspace JSON file" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void importWorkspace(file); event.currentTarget.value = ""; }} ref={importInputRef} type="file" />
         <div className="top-actions">
+          <button className="projects-button" onClick={() => setProjectsOpen(true)} title="All projects">Projects</button>
           <div className="intent-switch" aria-label="Workspace intent"><button className={intent === "build" ? "active" : ""} onClick={() => setIntent("build")}>Build</button><button className={intent === "publish" ? "active" : ""} onClick={() => setIntent("publish")}>Publish</button></div>
+          <button
+            aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+            aria-pressed={theme === "dark"}
+            className="theme-toggle"
+            onClick={toggleTheme}
+            title={theme === "dark" ? "Light theme" : "Dark theme"}
+          >{theme === "dark" ? "☀" : "☾"}</button>
           <button aria-label="Start presentation" className="present" disabled={document.nodes.length === 0} onClick={startPresenting} title="Present scenes (Esc to exit)">▶ Present</button>
           <AccountControl onOpen={() => setAccountOpen(true)} session={session} state={syncState} />
         </div>
@@ -745,23 +800,7 @@ export function EditorShell() {
         <aside className={`library-panel${libraryCollapsed ? " is-collapsed" : ""}`}>
           <button aria-label={libraryCollapsed ? "Expand left panel" : "Collapse left panel"} className="library-collapse" onClick={() => animateLayout(() => setLibraryCollapsed((value) => !value))}>{libraryCollapsed ? "›" : "‹"}</button>
           <div aria-hidden="true" className="library-resizer" onPointerDown={(event) => startResize(event, "left")} />
-          <div className="panel-heading"><span>WORKSPACES</span><button aria-label="Create workspace" className="panel-add" onClick={createWorkspace}>＋</button></div>
-          <div className="workspace-list">{workspaces.map((workspace, index) => (
-            <div className={`workspace-row${workspace.id === activeWorkspaceId ? " active" : ""}`} key={workspace.id}>
-              <button onClick={() => { setActiveWorkspaceId(workspace.id); setSelectedNodeIds([]); setSelectedEdgeIds([]); }}>
-                <i>{String(index + 1).padStart(2, "0")}</i>
-                <span>{workspace.workspaceTitle ?? workspace.title}</span>
-                <small>{workspace.scenes?.length ?? 1}</small>
-              </button>
-              {workspace.id === activeWorkspaceId ? <MenuBar menus={workspaceMenu} /> : null}
-            </div>
-          ))}</div>
-          <details className="sample-library">
-            <summary><span>CHART EXAMPLES</span><b>{diagramSamples.length}</b></summary>
-            <div>{diagramSamples.map((sample) => <button key={sample.id} onClick={() => createSampleWorkspace(sample)}><i>{String(sample.number).padStart(2, "0")}</i><strong>{sample.label}</strong><small>{sample.description}</small></button>)}</div>
-          </details>
-          <div className="library-divider" />
-          <div className="panel-heading"><span>COMPONENTS</span><div className="component-panel-actions"><button aria-label={componentListCollapsed ? "Expand component list" : "Collapse component list"} onClick={() => setComponentListCollapsed((value) => !value)}>{componentListCollapsed ? "Show" : "Hide"}</button><div className="library-view-switch"><button aria-label="Tree component view" className={libraryView === "tree" ? "active" : ""} onClick={() => setLibraryView("tree")}>Tree</button><button aria-label="Grid component view" className={libraryView === "grid" ? "active" : ""} onClick={() => setLibraryView("grid")}>Grid</button></div></div></div>
+          <div className="panel-heading is-top"><button aria-expanded={!componentListCollapsed} className="panel-heading-toggle" onClick={() => setComponentListCollapsed((value) => !value)} title={componentListCollapsed ? "Show components" : "Hide components"} type="button"><i aria-hidden="true">{componentListCollapsed ? "▸" : "▾"}</i>COMPONENTS</button><div className="component-panel-actions"><div className="library-view-switch"><button aria-label="Tree component view" className={libraryView === "tree" ? "active" : ""} onClick={() => setLibraryView("tree")}>Tree</button><button aria-label="Grid component view" className={libraryView === "grid" ? "active" : ""} onClick={() => setLibraryView("grid")}>Grid</button></div></div></div>
           {!componentListCollapsed ? <><label className="search"><span>⌕</span><input aria-label="Search primitives" onChange={(event) => setSearch(event.target.value)} placeholder="Search technology" value={search} /></label>
           <div className={`primitive-tree primitive-tree--${libraryView}`}>{primitiveGroups.map(([group, primitives]) => primitives.length ? <details open={search.trim().length > 0 || !collapsedCategories.has(group)} key={group}><summary onClick={(event) => { event.preventDefault(); setCollapsedCategories((current) => { const next = new Set(current); if (next.has(group)) next.delete(group); else next.add(group); return next; }); }}><span>{group}</span><b>{primitives.length}</b></summary><div className={`primitive-list primitive-list--${libraryView}`}>{primitives.map(renderPrimitive)}</div></details> : null)}</div></> : <div className="component-list-collapsed">Component library hidden</div>}
           <div className="provider-block"><span>PROVIDERS & STACKS</span><div><b>AWS</b><b>GCP</b><b>K8s</b><b>+{Math.max(0, technologyOptions.length - 3)}</b></div></div>
@@ -899,8 +938,8 @@ export function EditorShell() {
               </div>
               <span>Text color</span>
               <div className="color-editor">
-                {textColorPresets.map((color) => <button aria-label={`Set text color ${color}`} className={selectedNodes.every((node) => (node.textColor ?? "#f5f5f5").toLowerCase() === color) ? "active" : ""} key={color} onClick={() => updateSelected({ textColor: color })} style={{ "--swatch": color } as React.CSSProperties} />)}
-                <label title="Custom text color"><input aria-label="Custom component text color" type="color" value={selectedNodes[0].textColor ?? "#f5f5f5"} onChange={(event) => updateSelected({ textColor: event.target.value })} /><i /></label>
+                {textColorPresets.map((color) => <button aria-label={`Set text color ${color}`} className={selectedNodes.every((node) => resolveNodeInk(node.textColor).toLowerCase() === color) ? "active" : ""} key={color} onClick={() => updateSelected({ textColor: color })} style={{ "--swatch": color } as React.CSSProperties} />)}
+                <label title="Custom text color"><input aria-label="Custom component text color" type="color" value={resolveNodeInk(selectedNodes[0].textColor)} onChange={(event) => updateSelected({ textColor: event.target.value })} /><i /></label>
               </div>
               <span>Border style</span>
               <div className="line-style-picker">
@@ -952,6 +991,47 @@ export function EditorShell() {
           <button className="present-exit" onClick={stopPresenting}>Exit <kbd>Esc</kbd></button>
         </div>
       ) : null}
+      {videoChoiceOpen ? (() => {
+        const support = videoFormatSupport();
+        const choose = (format: VideoFormat) => { setVideoChoiceOpen(false); void runAnimatedExport("video", format); };
+        return <div className="config-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setVideoChoiceOpen(false); }}>
+          <section aria-label="Video format" aria-modal="true" className="config-dialog video-choice" role="dialog">
+            <header>
+              <div><span>EXPORT</span><h2>Video format</h2><p>Both are recorded in this browser at 1920px wide.</p></div>
+              <button aria-label="Close" onClick={() => setVideoChoiceOpen(false)}>×</button>
+            </header>
+            <div className="video-choice-grid">
+              <button disabled={!support.webm} onClick={() => choose("webm")}>
+                <strong>WebM</strong>
+                <small>{support.webm ? "VP9. Plays everywhere except older Safari and most editors." : "Not supported by this browser."}</small>
+              </button>
+              <button disabled={!support.mp4} onClick={() => choose("mp4")}>
+                <strong>MP4</strong>
+                <small>{support.mp4 ? "H.264. Drops straight into slides, editors and messaging apps." : "This browser cannot record MP4 — Chrome 126+ or Safari can."}</small>
+              </button>
+            </div>
+          </section>
+        </div>;
+      })() : null}
+      <ProjectBrowser
+        activeId={activeWorkspaceId}
+        onClose={() => setProjectsOpen(false)}
+        onCreate={() => { createWorkspace(); setProjectsOpen(false); }}
+        onDelete={deleteProject}
+        onDuplicate={duplicateProject}
+        onOpen={openProject}
+        onRename={renameProject}
+        onUseTemplate={createSampleWorkspace}
+        open={projectsOpen}
+        projects={workspaces}
+      />
+      <ImageLibrary
+        canApply={selectedNodeIds.length > 0}
+        onApply={(reference) => updateSelected({ backgroundImage: reference })}
+        onClose={() => setImageLibraryOpen(false)}
+        open={imageLibraryOpen}
+        projectId={projectIdFor(document.id)}
+      />
       <AiConnectionSettings open={configOpen} onClose={() => setConfigOpen(false)} />
       <AccountDialog
         onClose={() => setAccountOpen(false)}
