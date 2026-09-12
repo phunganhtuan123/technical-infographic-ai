@@ -10,6 +10,7 @@ import { inlineAssets } from "@/modules/projects/asset-urls";
 // The canvas draws this same rectangle, so the frame on screen and the file
 // that comes out are the same thing by construction.
 import { exportBounds as dimensions } from "@/modules/diagram/bounds";
+import { planLanes } from "@/modules/layout/lane-plan";
 
 const nodeWidth = 220;
 const nodeHeight = 104;
@@ -198,6 +199,12 @@ export function renderDocumentSvg(document: DiagramDocument, options: SvgRenderO
     edges: document.edges.map((edge) => ({ ...edge, color: resolveEdgeColor(edge.color, edge.semantics) })),
   };
   const nodes = new Map(document.nodes.map((node) => [node.id, node]));
+  // The same corridors the canvas routes along, so an export is the drawing the
+  // user approved rather than a second, differently tangled one.
+  const routeLanes = planLanes(
+    document.nodes.filter((node) => node.role !== "zone" && node.role !== "group"),
+    document.edges,
+  ).lanes;
   const edges = document.edges.map((edge, edgeIndex) => {
     const from = nodes.get(edge.from);
     const to = nodes.get(edge.to);
@@ -226,6 +233,8 @@ export function renderDocumentSvg(document: DiagramDocument, options: SvgRenderO
       })),
       waypoints: edge.routeWaypoints ?? (edge.routeWaypoint ? [edge.routeWaypoint] : undefined),
       offset: 12 + (edgeIndex % 4) * 6,
+      laneY: routeLanes.get(edge.id)?.laneY,
+      laneX: routeLanes.get(edge.id)?.laneX,
     });
     const color = edge.color;
     const marker = `arrow-${edge.id.replace(/[^a-z0-9_-]/gi, "-")}`;

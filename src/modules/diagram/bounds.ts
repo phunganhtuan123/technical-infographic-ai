@@ -1,4 +1,5 @@
 import type { DiagramDocument } from "@/modules/diagram/schema";
+import { planLanes } from "@/modules/layout/lane-plan";
 
 // Kept in its own module so the canvas can draw the export frame without
 // importing the exporter — which would pull the GIF encoder onto the editing
@@ -31,11 +32,22 @@ export function exportBounds(document: DiagramDocument): ExportBounds {
   const target = targets[format as keyof typeof targets] ?? targets["16:9"];
   if (document.nodes.length === 0) return { minX: 0, minY: 0, ...target };
 
-  let minX = Math.min(...document.nodes.map((node) => node.position.x)) - padding;
+  // Connectors that have to get past a row run in the margin beside the boxes,
+  // so the frame is sized to the drawing, not to the boxes — otherwise the
+  // export crops off the return line down the side of a flowchart.
+  const lanes = [...planLanes(
+    document.nodes.filter((node) => node.role !== "zone" && node.role !== "group"),
+    document.edges,
+  ).lanes.values()];
+  const laneX = lanes.map((lane) => lane.laneX).filter((value): value is number => value !== undefined);
+  const laneY = lanes.map((lane) => lane.laneY).filter((value): value is number => value !== undefined);
+  const laneClearance = 28;
+
+  let minX = Math.min(...document.nodes.map((node) => node.position.x), ...laneX.map((x) => x - laneClearance)) - padding;
   let minY = Math.min(...document.nodes.map((node) => node.position.y)) - padding - 68;
-  const maxX = Math.max(...document.nodes.map((node) => node.position.x + (node.size?.width ?? nodeWidth))) + padding;
+  const maxX = Math.max(...document.nodes.map((node) => node.position.x + (node.size?.width ?? nodeWidth)), ...laneX.map((x) => x + laneClearance)) + padding;
   const maxY = Math.max(...document.nodes.map((node) =>
-    node.position.y + (node.size?.height ?? nodeHeight) + (node.caption ? 20 : 0) + (node.note ? 18 : 0))) + padding;
+    node.position.y + (node.size?.height ?? nodeHeight) + (node.caption ? 20 : 0) + (node.note ? 18 : 0)), ...laneY.map((y) => y + laneClearance)) + padding;
 
   let width = Math.max(target.width, maxX - minX);
   let height = Math.max(target.height, maxY - minY);

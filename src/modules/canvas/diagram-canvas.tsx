@@ -40,6 +40,7 @@ import {
 import type { DiagramDocument, DiagramEdge, DiagramNode, EdgeDirection, EdgeSemantics } from "@/modules/diagram/schema";
 import { edgeColor, edgeColors } from "@/modules/catalog/catalog";
 import { edgeLanes } from "./edge-lanes";
+import { planLanes } from "@/modules/layout/lane-plan";
 import { exportBounds } from "@/modules/diagram/bounds";
 import { FlowTraceStyles } from "./flow-trace-styles";
 import { useFlowTrace } from "./use-flow-trace";
@@ -162,6 +163,13 @@ function toFlow(document: DiagramDocument) {
     data: node,
   }));
   const lanes = edgeLanes(document.edges);
+  // Which corridor each connector runs in, decided with every connector in
+  // view. The router picks a lane per connector and cannot see that the lane it
+  // chose is the one the connector beside it is already drawn on.
+  const routeLanes = planLanes(
+    document.nodes.filter((node) => node.role !== "zone" && node.role !== "group"),
+    document.edges,
+  ).lanes;
 
   const edges: SemanticFlowEdge[] = document.edges.map((edge, index) => ({
     id: edge.id,
@@ -189,6 +197,8 @@ function toFlow(document: DiagramDocument) {
       portLead: lanes.get(edge.id)?.lead ?? 14,
       anchorShift: lanes.get(edge.id)?.shift ?? 0,
       targetShift: lanes.get(edge.id)?.targetShift ?? 0,
+      laneY: routeLanes.get(edge.id)?.laneY,
+      laneX: routeLanes.get(edge.id)?.laneX,
     },
     ...edgeMarkers(edge.direction, edge.color ?? edgeColor(edge.semantics)),
   }));

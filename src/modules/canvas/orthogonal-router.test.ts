@@ -115,4 +115,57 @@ describe("routeOrthogonal", () => {
     expect(route.controls.every((control) => control.segmentIndex > 0 && (control.orientation === "horizontal" || control.orientation === "vertical"))).toBe(true);
     expect(route.points.length).toBeGreaterThanOrEqual(6);
   });
+  it("runs along the horizontal channel it was assigned", () => {
+    // Two branches out of one decision. Left to itself the router turns both of
+    // them at the same height and draws them as one line; the channel is what
+    // tells them apart, so it has to be followed even though turning at the
+    // anchor would be shorter.
+    const route = routeOrthogonal({
+      source: { x: 500, y: 600 },
+      target: { x: 300, y: 700 },
+      sourcePosition: Position.Bottom,
+      targetPosition: Position.Top,
+      obstacles: [],
+      laneY: 654,
+    });
+
+    const runsOnChannel = route.points.slice(1).some((point, index) =>
+      point.y === 654 && route.points[index].y === 654 && point.x !== route.points[index].x);
+    expect(runsOnChannel, JSON.stringify(route.points)).toBe(true);
+  });
+
+  it("takes the margin it was given rather than cutting across the boxes", () => {
+    // A return line from the bottom of a flowchart to its first step. Every
+    // column between the two ends is occupied, so the only clean way back is
+    // round the outside.
+    const obstacles = [0, 1, 2].map((row) => ({ x: 300, y: 200 + row * 200, width: 260, height: 110 }));
+    const route = routeOrthogonal({
+      source: { x: 430, y: 810 },
+      target: { x: 300, y: 150 },
+      sourcePosition: Position.Bottom,
+      targetPosition: Position.Left,
+      obstacles,
+      laneY: 870,
+      laneX: 210,
+    });
+
+    expect(routeIntersectsObstacle(route.points, obstacles), JSON.stringify(route.points)).toBe(false);
+    expect(route.points.some((point) => point.x === 210), JSON.stringify(route.points)).toBe(true);
+  });
+
+  it("still avoids the boxes when the channel it was given is blocked", () => {
+    // The plan is worked out from where the boxes were, and the user can drag
+    // one afterwards. A stale channel must not be followed into a box.
+    const obstacle = { x: 200, y: 300, width: 260, height: 110 };
+    const route = routeOrthogonal({
+      source: { x: 330, y: 200 },
+      target: { x: 330, y: 520 },
+      sourcePosition: Position.Bottom,
+      targetPosition: Position.Top,
+      obstacles: [obstacle],
+      laneY: 350,
+    });
+
+    expect(routeIntersectsObstacle(route.points, [obstacle]), JSON.stringify(route.points)).toBe(false);
+  });
 });

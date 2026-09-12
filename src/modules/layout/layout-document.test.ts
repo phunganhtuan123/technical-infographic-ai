@@ -4,6 +4,7 @@ import { architecturePlan } from "@/modules/fixtures/architecture-plan";
 import { diagramSamples } from "@/modules/fixtures/diagram-samples";
 import { createBlankDocument, createDiagramNode, primitiveDefinitions } from "@/modules/diagram/factory";
 import { countEdgeCrossings, layoutDocument } from "./layout-document";
+import { gapForChannels, planLanes } from "./lane-plan";
 
 describe("layoutDocument", () => {
   it("does not place two nodes at the same position", async () => {
@@ -143,5 +144,55 @@ describe("crossing reduction", () => {
     const queueX = ["a", "b", "c"].map((id) => laidOut.nodes.find((node) => node.id === `queue-${id}`)!.position.x);
     expect(queueX[0]).toBeLessThan(queueX[1]);
     expect(queueX[1]).toBeLessThan(queueX[2]);
+  });
+});
+
+describe("room for the connectors", () => {
+  it("widens a flowchart gap until the branches crossing it fit", async () => {
+    // A decision's two branches both have to run sideways through the gap below
+    // it. Spaced by a constant the gap holds one line, so the second was drawn
+    // on top of the first.
+    const step = (id: string, role: string) => ({
+      ...createDiagramNode(primitiveDefinitions.find((primitive) => primitive.role === role)!, { x: 0, y: 0 }, id),
+      lane: "core" as const,
+    });
+    const connect = (id: string, from: string, to: string) => ({
+      id, from, to,
+      semantics: "request" as const,
+      important: true,
+      animated: false,
+      direction: "forward" as const,
+      thickness: 1.8,
+      color: "#888888",
+      strokeStyle: "solid" as const,
+      effect: "pulse" as const,
+      speed: 2.1,
+      labelOffset: { x: 0, y: 0 },
+      sourcePort: "output" as const,
+      targetPort: "input" as const,
+    });
+    const document = {
+      ...createBlankDocument("quadratic", "Quadratic"),
+      mode: "flow" as const,
+      nodes: [
+        step("start", "start"), step("delta", "process"), step("sign", "decision"),
+        step("none", "process"), step("zero", "decision"), step("double", "process"), step("pair", "process"),
+      ],
+      edges: [
+        connect("e1", "start", "delta"), connect("e2", "delta", "sign"),
+        connect("e3", "sign", "none"), connect("e4", "sign", "zero"),
+        connect("e5", "zero", "double"), connect("e6", "zero", "pair"),
+      ],
+    };
+
+    const laidOut = await layoutDocument(document);
+    const { demand, rows } = planLanes(laidOut.nodes, laidOut.edges);
+    expect(rows.length).toBeGreaterThan(2);
+    rows.forEach((row, index) => {
+      const next = rows[index + 1];
+      if (!next) return;
+      expect(next.top - row.bottom, `gap below row ${index}`)
+        .toBeGreaterThanOrEqual(gapForChannels(demand.get(index) ?? 0));
+    });
   });
 });

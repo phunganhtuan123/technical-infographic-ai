@@ -1,5 +1,6 @@
 import type { DiagramDocument, DiagramEdge, DiagramFormat, DiagramNode } from "@/modules/diagram/schema";
 import { MAX_NODE_WIDTH } from "@/modules/diagram/label-metrics";
+import { gapForChannels, planLanes } from "./lane-plan";
 
 const outerPadding = 80;
 const horizontalGap = 80;
@@ -466,6 +467,44 @@ function clearOfColumns(x: number, boxWidth: number, columns: number[], clearanc
   return x;
 }
 
+/**
+ * Open up each row gap until the connectors crossing it have room.
+ *
+ * Rows were spaced by a constant, which is right for the gap a single arrow
+ * drops through and far too tight for the one under a decision, where three
+ * branches have to run sideways past each other. Each gap is widened to fit the
+ * channels the lane plan actually claimed in it, and everything below moves
+ * down by the difference.
+ */
+function spaceRowsForLanes(
+  nodes: DiagramNode[],
+  edges: DiagramEdge[],
+  positions: Map<string, DiagramNode["position"]>,
+  baseGap: number,
+) {
+  const boxes = nodes
+    .filter((node) => positions.has(node.id))
+    .map((node) => ({ id: node.id, position: positions.get(node.id)!, size: node.size }));
+  if (!boxes.length) return positions;
+  const { demand, rows } = planLanes(boxes, edges);
+  if (rows.length < 2) return positions;
+
+  const spaced = new Map(positions);
+  let shift = 0;
+  rows.forEach((row, index) => {
+    for (const id of row.ids) {
+      const position = spaced.get(id)!;
+      spaced.set(id, { x: position.x, y: Math.round(position.y + shift) });
+    }
+    const next = rows[index + 1];
+    if (!next) return;
+    const needed = Math.max(baseGap, gapForChannels(demand.get(index) ?? 0));
+    // Both bounds are pre-shift, so the accumulated shift cancels out.
+    shift += Math.max(0, needed - (next.top - row.bottom));
+  });
+  return spaced;
+}
+
 export async function layoutDocument(document: DiagramDocument): Promise<DiagramDocument> {
   const normalizedNodes = document.nodes.map((node) => ({ ...node, size: balancedSize(node) }));
   const ordinary = normalizedNodes.filter((node) => !node.containerId && node.role !== "zone" && node.role !== "group");
@@ -475,7 +514,8 @@ export async function layoutDocument(document: DiagramDocument): Promise<Diagram
 
   if (document.mode === "flow") {
     // A flowchart reads downward. Everything else keeps the lane layout.
-    for (const [id, position] of placeFlowchart(ordinary, document.edges, width)) positions.set(id, position);
+    const placed = placeFlowchart(ordinary, document.edges, width);
+    for (const [id, position] of spaceRowsForLanes(ordinary, document.edges, placed, 68)) positions.set(id, position);
   } else if (document.mode === "explainer-grid") {
     const columns = portrait ? 2 : 3;
     const gapX = 72;

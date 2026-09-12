@@ -23,6 +23,17 @@ type RouteInput = {
    * immediately after the anchor instead of somewhere near the far end.
    */
   portLead?: number;
+  /**
+   * Corridor this connector was given by the lane plan.
+   *
+   * `laneY` is the horizontal channel it should run along in the gap between
+   * two rows; `laneX` the vertical channel in the margin beside the drawing.
+   * They are worked out once for every connector together, because a router
+   * that sees one connector at a time cannot tell that the lane it just picked
+   * is the one the previous connector is already on.
+   */
+  laneY?: number;
+  laneX?: number;
 };
 
 function lead(point: RoutePoint, position: Position, distance: number): RoutePoint {
@@ -58,6 +69,12 @@ function segmentHitsObstacle(start: RoutePoint, end: RoutePoint, obstacle: Route
 
 export function routeIntersectsObstacle(points: RoutePoint[], obstacles: RouteObstacle[]) {
   return points.slice(1).some((point, index) => obstacles.some((obstacle) => segmentHitsObstacle(points[index], point, obstacle)));
+}
+
+/** How many box crossings a route makes, so the least bad one can still win. */
+function obstacleHits(points: RoutePoint[], obstacles: RouteObstacle[]) {
+  return points.slice(1).reduce((count, point, index) =>
+    count + obstacles.filter((obstacle) => segmentHitsObstacle(points[index], point, obstacle)).length, 0);
 }
 
 function routeLength(points: RoutePoint[]) {
@@ -144,7 +161,7 @@ function endpointDirectionsValid(points: RoutePoint[]) {
   return !sourceReverses && !targetReverses;
 }
 
-export function routeOrthogonal({ source, target, sourcePosition, targetPosition, obstacles, protectedObstacles = [], waypoint, waypoints, offset = 16, portLead: lead_ = 14 }: RouteInput) {
+export function routeOrthogonal({ source, target, sourcePosition, targetPosition, obstacles, protectedObstacles = [], waypoint, waypoints, offset = 16, portLead: lead_ = 14, laneY, laneX }: RouteInput) {
   const clearance = 8;
   const portLead = lead_;
   const expanded = obstacles.map((obstacle) => ({ x: obstacle.x - clearance, y: obstacle.y - clearance, width: obstacle.width + clearance * 2, height: obstacle.height + clearance * 2 }));
@@ -180,17 +197,62 @@ export function routeOrthogonal({ source, target, sourcePosition, targetPosition
     [start, { x: maxX + 24 + offset, y: start.y }, { x: maxX + 24 + offset, y: end.y }, end],
     ...obstacleDetours,
   ];
-  const candidates = innerCandidates.map((candidate) => simplify([source, ...candidate, target]));
+
+  /**
+   * The corridors this connector was told to use.
+   *
+   * Kept apart from the generic candidates so they can be given a discount:
+   * a lane route is worth a couple of extra bends, because the bends are the
+   * price of not being drawn on top of the connector next to it.
+   */
+  const laneCandidates: RoutePoint[][] = [];
+  const laneFallbacks: RoutePoint[][] = [];
+  const alongY = (y: number) => [start, { x: start.x, y }, { x: end.x, y }, end];
+  const alongX = (x: number) => [start, { x, y: start.y }, { x, y: end.y }, end];
+  if (laneY !== undefined && laneX !== undefined) {
+    // Down into the channel, out to the margin, past the rows, then back in.
+    // The long way round is the only way that crosses nothing — and both turns
+    // happen on assigned lines, so no part of it is shared with a neighbour.
+    laneCandidates.push([start, { x: start.x, y: laneY }, { x: laneX, y: laneY }, { x: laneX, y: end.y }, end]);
+    // Turning at the anchor instead is shorter, but the turn is then on a line
+    // nothing assigned — which is how two connectors end up sharing it. Kept as
+    // a candidate, without the discount.
+    laneFallbacks.push(alongX(laneX), alongY(laneY));
+  } else if (laneY !== undefined) {
+    laneCandidates.push(alongY(laneY));
+  } else if (laneX !== undefined) {
+    laneCandidates.push(alongX(laneX));
+  }
+
+  const candidates = [...laneCandidates, ...laneFallbacks, ...innerCandidates].map((candidate) => simplify([source, ...candidate, target]));
+  const laneCount = laneCandidates.length;
   const manualWaypoints = (waypoints?.length ? waypoints : waypoint ? [waypoint] : []).slice(0, 12);
   const manualCandidates = manualWaypoints.length
     ? routesThrough([start, end], manualWaypoints).map((candidate) => simplify([source, ...candidate, target]))
     : [];
   const validManual = manualCandidates.filter((candidate) => endpointDirectionsValid(candidate) && !routeIntersectsObstacle(candidate, blocked));
-  const valid = candidates.filter((candidate) => endpointDirectionsValid(candidate) && !routeIntersectsObstacle(candidate, blocked));
+
+  /**
+   * What a route costs, so the least bad one wins when none is clean.
+   *
+   * Filtering the invalid routes out and falling back to the shortest of
+   * everything is what drew a connector straight through a box: once no
+   * candidate was clean, the fallback ignored the boxes entirely. Scoring keeps
+   * a route that clips one box ahead of one that clips three.
+   */
+  const LANE_DISCOUNT = 30000;
+  const cost = (points: RoutePoint[], index: number) =>
+    obstacleHits(points, blocked) * 250000
+    + (endpointDirectionsValid(points) ? 0 : 120000)
+    + points.length * 10000
+    + routeLength(points)
+    - (index < laneCount ? LANE_DISCOUNT : 0);
+
+  const scored = candidates.map((points, index) => ({ points, cost: cost(points, index) }));
   const routeScore = (left: RoutePoint[], right: RoutePoint[]) => (left.length - right.length) * 10000 + routeLength(left) - routeLength(right);
   const selected = validManual.length
     ? validManual.sort(routeScore)[0]
-    : (valid.length ? valid : candidates).sort(routeScore)[0];
+    : scored.sort((left, right) => left.cost - right.cost)[0].points;
   const label = midpoint(selected);
   const controls = editableControls(selected);
   const control = controls[0] ?? label;

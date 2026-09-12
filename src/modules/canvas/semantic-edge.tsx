@@ -29,6 +29,8 @@ type SemanticEdgeData = {
   portLead?: number;
   anchorShift?: number;
   targetShift?: number;
+  laneY?: number;
+  laneX?: number;
 } & Record<string, unknown>;
 
 export type SemanticFlowEdge = Edge<SemanticEdgeData, "semantic">;
@@ -112,6 +114,8 @@ export function SemanticEdge(props: EdgeProps<SemanticFlowEdge>) {
     waypoints: manualWaypoints,
     offset: props.data?.routeOffset ?? 16,
     portLead: props.data?.portLead ?? 14,
+    laneY: props.data?.laneY,
+    laneX: props.data?.laneX,
   });
   const color = resolveEdgeColor(props.data?.color, props.data?.semantics);
   // Border stays the connector colour; the label text is mixed toward the body
