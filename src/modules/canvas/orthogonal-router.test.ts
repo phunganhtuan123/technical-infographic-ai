@@ -175,6 +175,30 @@ describe("routeOrthogonal", () => {
     expect(clearances.every((gap) => gap >= 22), JSON.stringify(route.points)).toBe(true);
   });
 
+  it("does not let a long lead reach into the box across a narrow gap", () => {
+    // Connectors sharing an anchor get longer leads so they separate at
+    // different distances. Where the gap between two boxes is shorter than the
+    // lead, the lead lands inside the neighbour — and then every candidate
+    // route starts on a segment that is already crossing something, the
+    // obstacle penalty is identical for all of them, and it stops choosing:
+    // the shortest route wins even when it goes straight through two boxes.
+    const neighbour = { x: 393, y: 614, width: 309, height: 104 };
+    const route = routeOrthogonal({
+      source: { x: 758, y: 666 },
+      target: { x: 545, y: 132 },
+      sourcePosition: Position.Left,
+      targetPosition: Position.Left,
+      obstacles: [neighbour],
+      protectedObstacles: [{ x: 761, y: 617, width: 231, height: 98 }],
+      // 56px of gap, and the third connector at an anchor asks for 50.
+      portLead: 50,
+      laneY: 748,
+      laneX: 341,
+    });
+
+    expect(routeIntersectsObstacle(route.points, [neighbour]), JSON.stringify(route.points)).toBe(false);
+  });
+
   it("still avoids the boxes when the channel it was given is blocked", () => {
     // The plan is worked out from where the boxes were, and the user can drag
     // one afterwards. A stale channel must not be followed into a box.

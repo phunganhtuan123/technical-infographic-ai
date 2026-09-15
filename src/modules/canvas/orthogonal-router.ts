@@ -43,6 +43,40 @@ function lead(point: RoutePoint, position: Position, distance: number): RoutePoi
   return { x: point.x, y: point.y + distance };
 }
 
+/**
+ * How far the anchor can run straight out before it reaches a box.
+ *
+ * The lead is meant to get a connector clear of its own edge before it turns.
+ * Connectors sharing an anchor get longer ones so they separate at different
+ * distances — and a long one lands *inside* the neighbour when the gap between
+ * two boxes is shorter than the lead. Every candidate route then starts with a
+ * segment that is already crossing something, the obstacle penalty is the same
+ * for all of them, and it stops choosing: the shortest route wins even when it
+ * goes straight through two boxes. Capping the lead at the room actually there
+ * is what keeps the penalty able to tell routes apart.
+ */
+function freeRun(point: RoutePoint, position: Position, obstacles: RouteObstacle[], limit: number) {
+  let free = limit;
+  for (const obstacle of obstacles) {
+    const left = obstacle.x;
+    const right = obstacle.x + obstacle.width;
+    const top = obstacle.y;
+    const bottom = obstacle.y + obstacle.height;
+    const sideways = position === Position.Left || position === Position.Right;
+    if (sideways) {
+      if (point.y <= top || point.y >= bottom) continue;
+      const distance = position === Position.Left ? point.x - right : left - point.x;
+      if (distance >= 0) free = Math.min(free, distance);
+    } else {
+      if (point.x <= left || point.x >= right) continue;
+      const distance = position === Position.Top ? point.y - bottom : top - point.y;
+      if (distance >= 0) free = Math.min(free, distance);
+    }
+  }
+  // Never zero: a connector still has to leave its own edge somehow.
+  return Math.max(6, free);
+}
+
 function simplify(points: RoutePoint[]) {
   const deduplicated = points.filter((point, index) => index === 0 || point.x !== points[index - 1].x || point.y !== points[index - 1].y);
   return deduplicated.filter((point, index) => {
@@ -173,8 +207,8 @@ export function routeOrthogonal({ source, target, sourcePosition, targetPosition
   const breathing = 22;
   const roomy = obstacles.map((obstacle) => ({ x: obstacle.x - breathing, y: obstacle.y - breathing, width: obstacle.width + breathing * 2, height: obstacle.height + breathing * 2 }));
   const blocked = [...expanded, ...protectedObstacles];
-  const start = lead(source, sourcePosition, portLead);
-  const end = lead(target, targetPosition, portLead);
+  const start = lead(source, sourcePosition, Math.min(portLead, freeRun(source, sourcePosition, expanded, portLead)));
+  const end = lead(target, targetPosition, Math.min(portLead, freeRun(target, targetPosition, expanded, portLead)));
   const minX = Math.min(start.x, end.x, ...blocked.map((obstacle) => obstacle.x));
   const maxX = Math.max(start.x, end.x, ...blocked.map((obstacle) => obstacle.x + obstacle.width));
   const minY = Math.min(start.y, end.y, ...blocked.map((obstacle) => obstacle.y));
