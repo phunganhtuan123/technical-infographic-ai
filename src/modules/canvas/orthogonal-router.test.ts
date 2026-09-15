@@ -199,6 +199,27 @@ describe("routeOrthogonal", () => {
     expect(routeIntersectsObstacle(route.points, [neighbour]), JSON.stringify(route.points)).toBe(false);
   });
 
+  it("keeps a short hop between neighbours straight", () => {
+    // Anchors facing each other 56px apart, each asking for a 32px lead. The
+    // two lead points pass one another, reaching the far one means coming back
+    // on itself, the endpoint check rightly refuses that — and the router goes
+    // the long way instead, drawing a 56px step as a 158px staircase.
+    const route = routeOrthogonal({
+      source: { x: 702, y: 676 },
+      target: { x: 758, y: 676 },
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
+      obstacles: [],
+      protectedObstacles: [
+        { x: 396, y: 617, width: 303, height: 98 },
+        { x: 761, y: 617, width: 231, height: 98 },
+      ],
+      portLead: 32,
+    });
+
+    expect(route.points, JSON.stringify(route.points)).toHaveLength(2);
+  });
+
   it("still avoids the boxes when the channel it was given is blocked", () => {
     // The plan is worked out from where the boxes were, and the user can drag
     // one afterwards. A stale channel must not be followed into a box.

@@ -207,8 +207,27 @@ export function routeOrthogonal({ source, target, sourcePosition, targetPosition
   const breathing = 22;
   const roomy = obstacles.map((obstacle) => ({ x: obstacle.x - breathing, y: obstacle.y - breathing, width: obstacle.width + breathing * 2, height: obstacle.height + breathing * 2 }));
   const blocked = [...expanded, ...protectedObstacles];
-  const start = lead(source, sourcePosition, Math.min(portLead, freeRun(source, sourcePosition, expanded, portLead)));
-  const end = lead(target, targetPosition, Math.min(portLead, freeRun(target, targetPosition, expanded, portLead)));
+  let sourceLead = Math.min(portLead, freeRun(source, sourcePosition, expanded, portLead));
+  let targetLead = Math.min(portLead, freeRun(target, targetPosition, expanded, portLead));
+  // Two anchors facing each other across a short gap.
+  //
+  // Leads long enough to pass one another turn a straight hop into a detour:
+  // the route would have to come back on itself to reach a lead point it has
+  // already gone past, which the endpoint check rightly refuses — so the router
+  // picks a way around instead, and a 56px step between neighbours is drawn as
+  // a 158px staircase. Sharing the gap between the two leads keeps it straight.
+  const facing = sourcePosition === Position.Right && targetPosition === Position.Left ? target.x - source.x
+    : sourcePosition === Position.Left && targetPosition === Position.Right ? source.x - target.x
+    : sourcePosition === Position.Bottom && targetPosition === Position.Top ? target.y - source.y
+    : sourcePosition === Position.Top && targetPosition === Position.Bottom ? source.y - target.y
+    : Number.POSITIVE_INFINITY;
+  if (Number.isFinite(facing) && facing > 0 && sourceLead + targetLead > facing - 4) {
+    const share = Math.max(6, (facing - 4) / 2);
+    sourceLead = Math.min(sourceLead, share);
+    targetLead = Math.min(targetLead, share);
+  }
+  const start = lead(source, sourcePosition, sourceLead);
+  const end = lead(target, targetPosition, targetLead);
   const minX = Math.min(start.x, end.x, ...blocked.map((obstacle) => obstacle.x));
   const maxX = Math.max(start.x, end.x, ...blocked.map((obstacle) => obstacle.x + obstacle.width));
   const minY = Math.min(start.y, end.y, ...blocked.map((obstacle) => obstacle.y));

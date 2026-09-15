@@ -180,10 +180,23 @@ export function planPorts(edges: DiagramEdge[], nodes: Map<string, DiagramNode>)
       // the small hook that appears beside a node with nothing else near it.
       const climbing = middleY(target) < middleY(source) - source.size.height / 2;
       if (climbing) {
-        // Out and back along the same margin. Entering from the other side
-        // would mean crossing the target to reach its far edge.
-        const side = middleX(target) <= sheetMiddle ? "input" as const : "output" as const;
-        plan.set(edge.id, { sourcePort: side, targetPort: side });
+        const leftMargin = middleX(target) <= sheetMiddle;
+        // Leaving downwards, not sideways.
+        //
+        // A connector climbing back up is always sent down into a channel and
+        // round a margin — that is the only way past the rows in between. So
+        // down is where it is going anyway, and a sideways exit just adds a
+        // turn. Worse, the space beside a box is the narrow gap to its
+        // neighbour, already carrying the connectors that genuinely run through
+        // it; dropping a third one in produces the tangle this is here to stop.
+        // The bottom anchor nearer the margin keeps the run short and leaves
+        // the middle one for the ordinary downward traffic.
+        plan.set(edge.id, {
+          sourcePort: leftMargin ? "event-output" : "data-output",
+          // Arriving on the margin side: coming in from the other edge would
+          // mean crossing the target to reach it.
+          targetPort: leftMargin ? "input" : "output",
+        });
       } else {
         const leftward = middleX(target) < middleX(source);
         plan.set(edge.id, leftward

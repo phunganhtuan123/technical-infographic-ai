@@ -221,10 +221,14 @@ describe("planPorts", () => {
     expect(plan.get("rightward")).toEqual({ sourcePort: "output", targetPort: "input" });
   });
 
-  it("sends a connector climbing back up out and back along one side", () => {
-    // Entering from the other side would mean crossing the target to reach its
-    // far edge, which is the same doubling-back in a different place.
+  it("sends a connector climbing back up downwards, not into the gap beside it", () => {
+    // It is going down into a channel and round a margin either way — that is
+    // the only way past the rows between. A sideways exit adds a turn, and the
+    // space beside a box is the narrow gap to its neighbour, already carrying
+    // the connectors that genuinely run through it.
     const plan = planPorts([wire("back", "right", "above")], sheet);
-    expect(plan.get("back")!.sourcePort).toBe(plan.get("back")!.targetPort);
+    expect(["event-output", "data-output"]).toContain(plan.get("back")!.sourcePort);
+    // and it arrives on the margin side rather than crossing the target.
+    expect(["input", "output"]).toContain(plan.get("back")!.targetPort);
   });
 });
