@@ -35,29 +35,34 @@ export function spreadAt(index: number, count: number) {
 }
 
 export function edgeLanes(edges: Pick<DiagramEdge, "id" | "from" | "to" | "sourcePort" | "targetPort">[]) {
-  const outIndex = new Map<string, number>();
-  const outTotal = new Map<string, number>();
-  const inIndex = new Map<string, number>();
-  const inTotal = new Map<string, number>();
+  // Seats at an anchor, counted per anchor rather than per direction.
+  //
+  // Leaving and arriving used to be counted in separate tallies, so two
+  // connectors running between the same pair of boxes in opposite directions
+  // each came out as the only one at its anchor, each took the centre, and they
+  // were drawn exactly on top of each other. Whether a connector arrives or
+  // departs makes no difference to the point it occupies.
+  const seat = new Map<string, number>();
+  const occupants = new Map<string, number>();
+  const anchorOf = (node: string, port: string | undefined, fallback: string) => `${node}:${port ?? fallback}`;
+  const take = (anchor: string, endpoint: string) => {
+    seat.set(endpoint, occupants.get(anchor) ?? 0);
+    occupants.set(anchor, (occupants.get(anchor) ?? 0) + 1);
+  };
 
   for (const edge of edges) {
-    const out = `${edge.from}:${edge.sourcePort ?? "output"}`;
-    outIndex.set(edge.id, outTotal.get(out) ?? 0);
-    outTotal.set(out, (outTotal.get(out) ?? 0) + 1);
-
-    const into = `${edge.to}:${edge.targetPort ?? "input"}`;
-    inIndex.set(edge.id, inTotal.get(into) ?? 0);
-    inTotal.set(into, (inTotal.get(into) ?? 0) + 1);
+    take(anchorOf(edge.from, edge.sourcePort, "output"), `${edge.id}:out`);
+    take(anchorOf(edge.to, edge.targetPort, "input"), `${edge.id}:in`);
   }
 
   const lanes = new Map<string, EdgeLane>();
   edges.forEach((edge, position) => {
-    const out = `${edge.from}:${edge.sourcePort ?? "output"}`;
-    const into = `${edge.to}:${edge.targetPort ?? "input"}`;
-    const fan = outIndex.get(edge.id) ?? 0;
+    const out = anchorOf(edge.from, edge.sourcePort, "output");
+    const into = anchorOf(edge.to, edge.targetPort, "input");
+    const fan = seat.get(`${edge.id}:out`) ?? 0;
     lanes.set(edge.id, {
-      shift: spreadAt(fan, outTotal.get(out) ?? 1),
-      targetShift: spreadAt(inIndex.get(edge.id) ?? 0, inTotal.get(into) ?? 1),
+      shift: spreadAt(fan, occupants.get(out) ?? 1),
+      targetShift: spreadAt(seat.get(`${edge.id}:in`) ?? 0, occupants.get(into) ?? 1),
       lead: 14 + fan * 18,
       detour: 16 + fan * 22 + (position % 3) * 5,
     });

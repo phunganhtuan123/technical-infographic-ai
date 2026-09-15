@@ -3,7 +3,7 @@ import { compilePlan } from "@/modules/compiler/compile-plan";
 import { architecturePlan } from "@/modules/fixtures/architecture-plan";
 import { diagramSamples } from "@/modules/fixtures/diagram-samples";
 import { createBlankDocument, createDiagramNode, primitiveDefinitions } from "@/modules/diagram/factory";
-import { countEdgeCrossings, layoutDocument } from "./layout-document";
+import { countEdgeCrossings, layoutDocument, planPorts } from "./layout-document";
 import { gapForChannels, planLanes } from "./lane-plan";
 
 describe("layoutDocument", () => {
@@ -194,5 +194,37 @@ describe("room for the connectors", () => {
       expect(next.top - row.bottom, `gap below row ${index}`)
         .toBeGreaterThanOrEqual(gapForChannels(demand.get(index) ?? 0));
     });
+  });
+});
+
+describe("planPorts", () => {
+  const box = (id: string, x: number, y: number) => [id, {
+    id, position: { x, y }, size: { width: 240, height: 104 },
+  }] as const;
+  const wire = (id: string, from: string, to: string) => ({ id, from, to }) as never;
+  // Two boxes side by side, and one well above them.
+  const sheet = new Map([box("left", 100, 600), box("right", 600, 600), box("above", 300, 100)]
+    .map(([id, node]) => [id, node])) as never;
+
+  it("leaves from the side the target is actually on", () => {
+    // Everything not going down used to leave from the right and arrive on the
+    // left, whichever way it was heading. For a target sitting to the left that
+    // is the worst possible pair: the connector leaves the far side of its own
+    // box, cannot cut back through it, and loops around — the small hook that
+    // shows up beside a node with nothing else near it.
+    const plan = planPorts([wire("leftward", "right", "left")], sheet);
+    expect(plan.get("leftward")).toEqual({ sourcePort: "input", targetPort: "output" });
+  });
+
+  it("keeps the ordinary left-to-right pair for a target on the right", () => {
+    const plan = planPorts([wire("rightward", "left", "right")], sheet);
+    expect(plan.get("rightward")).toEqual({ sourcePort: "output", targetPort: "input" });
+  });
+
+  it("sends a connector climbing back up out and back along one side", () => {
+    // Entering from the other side would mean crossing the target to reach its
+    // far edge, which is the same doubling-back in a different place.
+    const plan = planPorts([wire("back", "right", "above")], sheet);
+    expect(plan.get("back")!.sourcePort).toBe(plan.get("back")!.targetPort);
   });
 });

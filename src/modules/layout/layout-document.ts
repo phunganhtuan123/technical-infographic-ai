@@ -156,12 +156,40 @@ export function planPorts(edges: DiagramEdge[], nodes: Map<string, DiagramNode>)
   const leaving = new Map<string, DiagramEdge[]>();
   const arriving = new Map<string, DiagramEdge[]>();
 
+  // Which margin a connector climbing back up will be sent round, so the port
+  // it leaves from is on the side it is about to travel on. Same rule as the
+  // lane plan uses, deliberately: the two disagreeing is what produced a
+  // connector that left to the right and immediately turned back left.
+  const boxes = [...nodes.values()];
+  const sheetMiddle = boxes.length
+    ? (Math.min(...boxes.map((node) => node.position.x))
+      + Math.max(...boxes.map((node) => node.position.x + node.size.width))) / 2
+    : 0;
+  const middleX = (node: DiagramNode) => node.position.x + node.size.width / 2;
+  const middleY = (node: DiagramNode) => node.position.y + node.size.height / 2;
+
   for (const edge of edges) {
     const source = nodes.get(edge.from);
     const target = nodes.get(edge.to);
     if (!source || !target) continue;
     if (!isDownward(source, target)) {
-      plan.set(edge.id, { sourcePort: "output", targetPort: "input" });
+      // Anything not going down used to leave from the right and arrive on the
+      // left, whichever way it was actually heading. For a target sitting to the
+      // left that is the worst possible pair: the connector leaves the far side
+      // of its own box, cannot cut back through it, and has to loop around —
+      // the small hook that appears beside a node with nothing else near it.
+      const climbing = middleY(target) < middleY(source) - source.size.height / 2;
+      if (climbing) {
+        // Out and back along the same margin. Entering from the other side
+        // would mean crossing the target to reach its far edge.
+        const side = middleX(target) <= sheetMiddle ? "input" as const : "output" as const;
+        plan.set(edge.id, { sourcePort: side, targetPort: side });
+      } else {
+        const leftward = middleX(target) < middleX(source);
+        plan.set(edge.id, leftward
+          ? { sourcePort: "input", targetPort: "output" }
+          : { sourcePort: "output", targetPort: "input" });
+      }
       continue;
     }
     leaving.set(edge.from, [...(leaving.get(edge.from) ?? []), edge]);

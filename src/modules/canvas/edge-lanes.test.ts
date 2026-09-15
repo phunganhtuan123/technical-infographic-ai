@@ -49,6 +49,18 @@ describe("edge lanes", () => {
     expect(spreadAt(2, 3)).toBe(20);
   });
 
+  it("keeps a there-and-back pair off a single point", () => {
+    // Two boxes wired both ways. Departures and arrivals used to be tallied
+    // separately, so each connector came out as the only one at its anchor,
+    // each took the centre, and the pair was drawn as one line.
+    const lanes = edgeLanes([
+      edge("there", "a", "b", "output", "input"),
+      edge("back", "b", "a", "input", "output"),
+    ]);
+    expect(lanes.get("there")!.shift).not.toBe(0);
+    expect(lanes.get("back")!.targetShift).not.toBe(0);
+  });
+
   it("treats different anchors on one box as different groups", () => {
     const lanes = edgeLanes([
       edge("a", "x", "p", "output"),
