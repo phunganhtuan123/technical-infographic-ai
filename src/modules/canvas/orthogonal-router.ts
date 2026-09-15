@@ -165,6 +165,13 @@ export function routeOrthogonal({ source, target, sourcePosition, targetPosition
   const clearance = 8;
   const portLead = lead_;
   const expanded = obstacles.map((obstacle) => ({ x: obstacle.x - clearance, y: obstacle.y - clearance, width: obstacle.width + clearance * 2, height: obstacle.height + clearance * 2 }));
+  // How close a connector may pass a box before it starts to read as touching
+  // it. Not a second clearance — raising the hard one turns a tight gap into no
+  // gap at all, and the route then leaves the neighbourhood entirely to get
+  // past. This is a preference, priced below a bend: where there is room the
+  // connector takes it, where there is not it still goes through.
+  const breathing = 22;
+  const roomy = obstacles.map((obstacle) => ({ x: obstacle.x - breathing, y: obstacle.y - breathing, width: obstacle.width + breathing * 2, height: obstacle.height + breathing * 2 }));
   const blocked = [...expanded, ...protectedObstacles];
   const start = lead(source, sourcePosition, portLead);
   const end = lead(target, targetPosition, portLead);
@@ -251,6 +258,10 @@ export function routeOrthogonal({ source, target, sourcePosition, targetPosition
     obstacleHits(points, blocked) * 250000
     + (endpointDirectionsValid(points) ? 0 : 120000)
     + points.length * 10000
+    // Segments that clear the box but skim it. Priced at a quarter of a bend:
+    // enough to pick the lane with room when two are otherwise equal, never
+    // enough to buy a detour.
+    + Math.max(0, obstacleHits(points, roomy) - obstacleHits(points, expanded)) * 2500
     + routeLength(points)
     - (index < laneCount ? LANE_DISCOUNT : 0);
 

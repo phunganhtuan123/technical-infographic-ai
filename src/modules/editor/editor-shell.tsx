@@ -1006,7 +1006,7 @@ export function EditorShell() {
         return <div className="config-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setVideoChoiceOpen(false); }}>
           <section aria-label="Video format" aria-modal="true" className="config-dialog video-choice" role="dialog">
             <header>
-              <div><span>EXPORT</span><h2>Video format</h2><p>Both are recorded in this browser at 1920px wide.</p></div>
+              <div><span>EXPORT</span><h2>Video format</h2><p>Both are recorded in this browser, up to 1920px on the long side.</p></div>
               <button aria-label="Close" onClick={() => setVideoChoiceOpen(false)}>×</button>
             </header>
             <div className="video-choice-grid">

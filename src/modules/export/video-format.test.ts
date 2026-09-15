@@ -36,3 +36,39 @@ describe("video formats", () => {
     expect(videoFormatSupport()).toEqual({ webm: false, mp4: false });
   });
 });
+
+describe("raster size", () => {
+  const sheet = (width: number, height: number) => ({
+    format: "full" as const,
+    nodes: [{ id: "a", position: { x: 0, y: 0 }, size: { width, height } }],
+    edges: [],
+  });
+
+  it("fills the frame a video promises instead of stopping at the diagram's own size", async () => {
+    // The source is an SVG, which redraws sharp at any size. Capping the scale
+    // at 1 meant a small diagram recorded a small video while the PNG of the
+    // same diagram came out at 2x — the whole of why video looked soft.
+    const { rasterDimensions } = await import("./export-document");
+    const small = rasterDimensions(sheet(400, 300) as never, 1920, true);
+    expect(Math.max(small.width, small.height)).toBeGreaterThan(1000);
+  });
+
+  it("never blows a small diagram up for a GIF, where every pixel costs bytes", async () => {
+    const { rasterDimensions } = await import("./export-document");
+    // Same enormous target both ways: without the flag the scale stops at 1:1,
+    // with it the frame is filled. That difference is the whole flag.
+    const capped = rasterDimensions(sheet(400, 300) as never, 100000);
+    const filled = rasterDimensions(sheet(400, 300) as never, 100000, true);
+    expect(Math.max(capped.width, capped.height))
+      .toBeLessThan(Math.max(filled.width, filled.height));
+  });
+
+  it("returns even dimensions, because H.264 encodes in 2x2 blocks", async () => {
+    const { rasterDimensions } = await import("./export-document");
+    for (const [width, height] of [[401, 301], [999, 777], [1233, 651]]) {
+      const size = rasterDimensions(sheet(width, height) as never, 1920, true);
+      expect(size.width % 2, `${width}x${height}`).toBe(0);
+      expect(size.height % 2, `${width}x${height}`).toBe(0);
+    }
+  });
+});

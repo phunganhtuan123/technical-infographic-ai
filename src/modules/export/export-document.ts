@@ -358,10 +358,28 @@ export async function exportPng(document: DiagramDocument) {
   image.src = url;
 }
 
-function rasterDimensions(document: DiagramDocument, maxDimension: number) {
+/**
+ * How big to rasterise, in pixels.
+ *
+ * `upscale` is the difference between "do not blow a small picture up" and "fill
+ * the frame you promised". A GIF wants the first: it is a palette of 128 colours
+ * and every pixel costs bytes. A video wants the second — the source is an SVG,
+ * which redraws sharp at any size, so capping the scale at 1 meant a 1280px
+ * diagram recorded a 1280px video while the PNG of the same diagram came out at
+ * 2x. That is the whole of why the video looked soft next to everything else.
+ *
+ * Even numbers because H.264 encodes in 2x2 blocks and an odd dimension is
+ * either refused or silently padded with a green edge.
+ */
+export function rasterDimensions(document: DiagramDocument, targetDimension: number, upscale = false) {
   const bounds = dimensions(document);
-  const scale = Math.min(1, maxDimension / Math.max(bounds.width, bounds.height));
-  return { width: Math.max(1, Math.round(bounds.width * scale)), height: Math.max(1, Math.round(bounds.height * scale)) };
+  const longest = Math.max(bounds.width, bounds.height);
+  // Four is not a quality limit — the SVG has no limit — it is an encoder one.
+  const scale = upscale
+    ? Math.min(4, targetDimension / longest)
+    : Math.min(1, targetDimension / longest);
+  const even = (value: number) => Math.max(2, Math.round(value * scale / 2) * 2);
+  return { width: even(bounds.width), height: even(bounds.height) };
 }
 
 function loadSvgImage(svg: string) {
@@ -452,7 +470,7 @@ export async function exportVideo(document: DiagramDocument, format: VideoFormat
       : "This browser cannot encode WebM video");
   }
   const ready = await inlineAssets(document);
-  const size = rasterDimensions(ready, 1920);
+  const size = rasterDimensions(ready, 1920, true);
   const canvas = window.document.createElement("canvas");
   canvas.width = size.width;
   canvas.height = size.height;

@@ -153,6 +153,28 @@ describe("routeOrthogonal", () => {
     expect(route.points.some((point) => point.x === 210), JSON.stringify(route.points)).toBe(true);
   });
 
+  it("leaves room beside a box rather than skimming its edge", () => {
+    // Clearing a box by four pixels is not a crossing, but it reads as one.
+    // Raising the hard clearance instead would turn a tight gap into no gap and
+    // send the connector out of the neighbourhood to get past, so the distance
+    // is a preference priced below a bend, not a rule.
+    const blocker = { x: 120, y: 300, width: 440, height: 200 };
+    const route = routeOrthogonal({
+      source: { x: 300, y: 120 },
+      target: { x: 300, y: 700 },
+      sourcePosition: Position.Bottom,
+      targetPosition: Position.Top,
+      obstacles: [blocker],
+    });
+
+    const runs = route.points.slice(1)
+      .map((point, index) => [route.points[index], point] as const)
+      .filter(([start, end]) => start.x === end.x && Math.abs(end.y - start.y) > 40);
+    const clearances = runs.map(([start]) =>
+      Math.min(Math.abs(start.x - blocker.x), Math.abs(start.x - (blocker.x + blocker.width))));
+    expect(clearances.every((gap) => gap >= 22), JSON.stringify(route.points)).toBe(true);
+  });
+
   it("still avoids the boxes when the channel it was given is blocked", () => {
     // The plan is worked out from where the boxes were, and the user can drag
     // one afterwards. A stale channel must not be followed into a box.
