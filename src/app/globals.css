@@ -1110,7 +1110,6 @@ button:disabled { cursor: not-allowed !important; }
 .admin-panel-actions { display: flex !important; gap: 5px; justify-content: flex-end; }
 .admin-panel-actions button { height: 28px; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text-secondary); font-size: 9px; cursor: pointer; white-space: nowrap; }
 .admin-panel-actions button:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); }
-.admin-panel-actions button:disabled { opacity: .38; cursor: not-allowed; }
 .admin-panel-delete:hover:not(:disabled) { border-color: var(--red, #e11d48) !important; color: var(--red, #e11d48) !important; }
 .admin-panel-empty, .admin-panel-status { padding: 14px 12px; color: var(--text-muted); font-size: 10px; }
 
