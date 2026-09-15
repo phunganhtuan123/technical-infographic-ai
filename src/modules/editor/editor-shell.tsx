@@ -18,7 +18,9 @@ import { AccountControl, AccountDialog, AiGatewayChip, ConflictDialog } from "@/
 import { MenuBar, type Menu, type MenuItem } from "@/modules/editor/menu-bar";
 import { uploadAsset } from "@/modules/projects/api-client";
 import { assetIdOf, assetReference, rememberAsset } from "@/modules/projects/asset-urls";
+import { isAdmin } from "@/modules/projects/api-client";
 import { HistoryDialog } from "@/modules/projects/history-panel";
+import { AdminPanel } from "@/modules/projects/admin-panel";
 import { ImageLibrary } from "@/modules/projects/image-library";
 import { ProjectBrowser } from "@/modules/projects/project-browser";
 import { useCloudSync } from "@/modules/projects/cloud-sync";
@@ -168,6 +170,7 @@ function AiStatusChip({ onOpen }: { onOpen: () => void }) {
 export function EditorShell() {
   const { theme, toggle: toggleTheme } = useTheme();
   const [imageLibraryOpen, setImageLibraryOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
   const [videoChoiceOpen, setVideoChoiceOpen] = useState(false);
   const [projectsOpen, setProjectsOpen] = useState(false);
 
@@ -681,6 +684,12 @@ export function EditorShell() {
       command("Background image…", () => setInspectorCollapsed(false), { disabled: selectedNodeIds.length === 0 }),
       command("Image library…", () => setImageLibraryOpen(true)),
     ] },
+    // Only an administrator is offered the screen. The server refuses the calls
+    // behind it for everyone else regardless — this just avoids showing a menu
+    // item that leads to a wall.
+    ...(isAdmin(session?.user) ? [{ label: "Admin", items: [
+      command("Accounts…", () => setAdminOpen(true)),
+    ] }] : []),
     { label: "AI", items: [
       heading("Gateway"),
       command("Connect a gateway…", () => setConfigOpen(true)),
@@ -1031,6 +1040,11 @@ export function EditorShell() {
         onClose={() => setImageLibraryOpen(false)}
         open={imageLibraryOpen}
         projectId={projectIdFor(document.id)}
+      />
+      <AdminPanel
+        currentUserId={session?.user.id}
+        onClose={() => setAdminOpen(false)}
+        open={adminOpen && isAdmin(session?.user)}
       />
       <AiConnectionSettings open={configOpen} onClose={() => setConfigOpen(false)} />
       <AccountDialog

@@ -213,6 +213,12 @@ export function routeOrthogonal({ source, target, sourcePosition, targetPosition
     // Down into the channel, out to the margin, past the rows, then back in.
     // The long way round is the only way that crosses nothing — and both turns
     // happen on assigned lines, so no part of it is shared with a neighbour.
+    //
+    // Both corridors together mean a connector climbing back up the drawing:
+    // the lane plan hands a margin to nothing else. So the discount belongs
+    // here rather than being shared with the channel-only route — the margin is
+    // what keeps three return lines off each other, and a cheaper route that
+    // turns beside the boxes puts them back on one line.
     laneCandidates.push([start, { x: start.x, y: laneY }, { x: laneX, y: laneY }, { x: laneX, y: end.y }, end]);
     // Turning at the anchor instead is shorter, but the turn is then on a line
     // nothing assigned — which is how two connectors end up sharing it. Kept as

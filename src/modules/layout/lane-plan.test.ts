@@ -45,6 +45,24 @@ describe("planLanes", () => {
     expect(lanes.get("left")?.laneY).toBe(lanes.get("right")?.laneY);
   });
 
+  it("hands a connector between two boxes on one row straight across", () => {
+    // "Not going down" was read as "climbing back up", so a neighbour's
+    // connector was given the gap under its own row to turn in and a margin to
+    // run along, and drew as a small hook going nowhere.
+    const { lanes } = planLanes(nodes, [link("across", "double", "two")]);
+    expect(lanes.get("across")).toBeUndefined();
+  });
+
+  it("does not send a connector to the margin just for passing a row", () => {
+    // The margin is six hundred pixels out and six hundred back. Getting around
+    // one box in the way is a detour of a few dozen, which the router already
+    // considers — the corridor is what keeps two such detours off one line, and
+    // that is all the margin was ever needed for here.
+    const { lanes } = planLanes(nodes, [link("skip", "d<0", "double")]);
+    expect(lanes.get("skip")!.laneY).toBeDefined();
+    expect(lanes.get("skip")!.laneX).toBeUndefined();
+  });
+
   it("sends a connector climbing back up out to the margin", () => {
     const { lanes } = planLanes(nodes, [link("back", "double", "actor")]);
     const lane = lanes.get("back")!;

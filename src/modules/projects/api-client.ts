@@ -14,14 +14,24 @@ const fallbackOrigin = "https://infographic-api.flytory.com";
 // Next inlines this at build time, so the ?? runs against a literal.
 export const apiOrigin = (process.env.NEXT_PUBLIC_API_ORIGIN || fallbackOrigin).replace(/\/+$/, "");
 
+export type UserRole = "user" | "admin";
+
 export type AccountUser = {
   id: string;
   email?: string;
   displayName: string;
   avatarUrl?: string;
+  role: UserRole;
+  /** Set while an administrator has the account suspended. */
+  disabledAt?: string;
   createdAt: string;
   updatedAt: string;
 };
+
+/** One account as the administration screen lists it. */
+export type ManagedUser = AccountUser & { projectCount: number };
+
+export const isAdmin = (user: AccountUser | undefined | null) => user?.role === "admin";
 
 export type Session = {
   user: AccountUser;
@@ -432,4 +442,51 @@ export async function deleteAsset(id: string): Promise<void> {
 
 export function absoluteAssetUrl(url: string) {
   return url.startsWith("http") ? url : `${apiOrigin}${url}`;
+}
+
+
+// ---------------------------------------------------------------------------
+// Administration
+//
+// Every call here is refused with 403 for an ordinary account — the server is
+// the boundary, and the editor only hides the screen so nobody is offered a
+// button that would fail.
+// ---------------------------------------------------------------------------
+
+export type UserFilter = { query?: string; status?: "all" | "active" | "disabled"; limit?: number; offset?: number };
+
+export async function listUsers(filter: UserFilter = {}): Promise<{ users: ManagedUser[]; total: number }> {
+  const params = new URLSearchParams();
+  if (filter.query) params.set("query", filter.query);
+  if (filter.status && filter.status !== "all") params.set("status", filter.status);
+  if (filter.limit) params.set("limit", String(filter.limit));
+  if (filter.offset) params.set("offset", String(filter.offset));
+  const suffix = params.size ? `?${params}` : "";
+  const response = await authorized(`/v1/admin/users${suffix}`);
+  const body = await decode<{ users: ManagedUser[] | null; total: number }>(response);
+  return { users: body.users ?? [], total: body.total ?? 0 };
+}
+
+export async function setUserDisabled(id: string, disabled: boolean): Promise<AccountUser> {
+  const response = await authorized(`/v1/admin/users/${id}`, {
+    method: "PATCH",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ disabled }),
+  });
+  return decode<AccountUser>(response);
+}
+
+export async function setUserRole(id: string, role: UserRole): Promise<AccountUser> {
+  const response = await authorized(`/v1/admin/users/${id}`, {
+    method: "PATCH",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ role }),
+  });
+  return decode<AccountUser>(response);
+}
+
+export async function deleteUser(id: string): Promise<void> {
+  const response = await authorized(`/v1/admin/users/${id}`, { method: "DELETE" });
+  if (response.status === 404) return; // Already gone is the outcome we wanted.
+  await decode<void>(response);
 }

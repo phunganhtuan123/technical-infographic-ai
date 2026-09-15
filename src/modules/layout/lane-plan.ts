@@ -132,12 +132,20 @@ export function planLanes(
     const fromRow = rowOf.get(edge.from) ?? 0;
     const toRow = rowOf.get(edge.to) ?? 0;
     const forward = toRow > fromRow;
+    const sameRow = toRow === fromRow;
     const sideways = Math.abs(to.centreX - from.centreX) > STRAIGHT_ENOUGH;
     const spansRows = toRow - fromRow > 1;
     const lane: RouteLane = {};
 
     // Adjacent rows, straight down: already in a lane of its own.
     if (forward && !spansRows && !sideways) continue;
+
+    // Two boxes side by side on one row hand their connector straight across,
+    // and it needs no corridor at all. This used to fall through to the branch
+    // below — "not forward" was read as "climbing back up" — which sent a
+    // neighbour's connector down into the gap under its own row and out to the
+    // margin, and drew it as a little hook going nowhere.
+    if (sameRow) continue;
 
     // The horizontal run happens in the gap below the row the connector leaves,
     // which is the one it is turning in. Picking any other gap puts the turn
@@ -156,10 +164,16 @@ export function planLanes(
       lane.laneY = Math.round(sheetBottom + BAND_INSET + channel * CHANNEL_SPACING);
     }
 
-    // Passing a whole row, or climbing back up, means leaving the columns
-    // entirely — otherwise the connector is drawn straight over whatever
-    // happens to sit between the two ends.
-    if (spansRows || !forward) {
+    // Only a connector climbing back up is sent out to the margin.
+    //
+    // A forward one that merely passes a row used to get a margin too, and the
+    // discount meant it took it: a connector whose target sat almost directly
+    // below was drawn all the way out to the edge of the sheet and back, six
+    // hundred pixels each way, to get past one box. Going around that box is a
+    // detour of a few dozen pixels and the router already considers it — the
+    // corridor above is what keeps two such detours off the same line, which
+    // was the only thing the margin was needed for.
+    if (!forward) {
       // The side is picked by where the connector has to *arrive*, not by the
       // midpoint of the two ends. A connector that swings out to the right and
       // then comes back into a left-facing port has to pass the box to reach
